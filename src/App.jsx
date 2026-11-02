@@ -9,6 +9,7 @@ import {
   signOut,
   onAuthStateChanged,
   updateProfile,
+  updatePassword,
 } from "firebase/auth";
 import {
   getFirestore,
@@ -38,6 +39,12 @@ import {
   X,
   Code,
   Eye,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
+  KeyRound,
+  CheckCircle2,
 } from "lucide-react";
 
 const firebaseConfig = {
@@ -83,6 +90,27 @@ const formatBRL = (value) => {
   });
 };
 
+const toSafeInt = (val, fallback = 0) => {
+  const n = parseInt(val, 10);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const toSafeNumber = (val, fallback = 0) => {
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const sanitizeCycle = (val) => {
+  if (typeof val === "number" && Number.isFinite(val) && Math.abs(val) < 500) {
+    return Math.trunc(val);
+  }
+  if (typeof val === "string" && /^-?\d+$/.test(val.trim())) {
+    const n = parseInt(val.trim(), 10);
+    if (Number.isFinite(n) && Math.abs(n) < 500) return n;
+  }
+  return 0;
+};
+
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [user, setUser] = useState(null);
@@ -95,13 +123,20 @@ export default function App() {
   const [emailInput, setEmailInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authSuccess, setAuthSuccess] = useState("");
 
   const [activeView, setActiveView] = useState("dashboard");
+  const [showOnlyActiveInCycle, setShowOnlyActiveInCycle] = useState(false);
 
   const [salary, setSalary] = useState(0);
   const [fixedExpenses, setFixedExpenses] = useState([]);
   const [cards, setCards] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [currentCycle, setCurrentCycle] = useState(0);
+
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [newPasswordInput, setNewPasswordInput] = useState("");
+  const [passwordFeedback, setPasswordFeedback] = useState("");
 
   const [isEditingSalary, setIsEditingSalary] = useState(false);
   const [salaryInput, setSalaryInput] = useState("");
@@ -220,7 +255,26 @@ export default function App() {
       if (loadedCards.length > 0 && !selectedCardIdForDetails) {
         setSelectedCardIdForDetails(loadedCards[0].id);
       }
-      setExpenses(data.expenses || []);
+      const validCycle = sanitizeCycle(data.currentCycle);
+      const cleanedExpenses = (data.expenses || []).map((exp) => {
+        const inst = Math.max(1, toSafeInt(exp.installments, 1));
+        const rawTotal = toSafeNumber(exp.totalAmount ?? exp.amount, 0);
+        const rawInstVal = toSafeNumber(exp.installmentValue, 0);
+        const totalAmount = rawTotal > 0 ? rawTotal : rawInstVal * inst;
+        const installmentValue = rawInstVal > 0 ? rawInstVal : totalAmount / inst;
+        return {
+          ...exp,
+          installments: inst,
+          totalAmount,
+          installmentValue,
+          startCycle: sanitizeCycle(exp.startCycle),
+        };
+      });
+      setExpenses(cleanedExpenses);
+      setCurrentCycle(validCycle);
+      if (data.currentCycle !== validCycle) {
+        await setDoc(userRef, { currentCycle: validCycle, expenses: cleanedExpenses }, { merge: true });
+      }
     } else {
       const initialData = {
         name: firebaseUser.displayName || nameInput || "Usuário",
@@ -230,6 +284,7 @@ export default function App() {
         fixedExpenses: [],
         cards: [],
         expenses: [],
+        currentCycle: 0,
         createdAt: new Date().toISOString(),
       };
       await setDoc(userRef, initialData);
@@ -239,6 +294,7 @@ export default function App() {
       setFixedExpenses([]);
       setCards([]);
       setExpenses([]);
+      setCurrentCycle(0);
     }
   };
 
@@ -252,16 +308,106 @@ export default function App() {
     setAuthError("");
     try {
       localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
-      await signInWithPopup(auth, googleProvider);
+      const cred = await signInWithPopup(auth, googleProvider);
+      if (isRegistering && passwordInput && passwordInput.length >= 6) {
+        try {
+          await updatePassword(cred.user, passwordInput);
+        } catch (pwdErr) {
+          console.warn("Aviso ao vincular senha inicial:", pwdErr);
+        }
+      }
     } catch (err) {
       localStorage.removeItem(SESSION_STORAGE_KEY);
       setAuthError("Erro ao autenticar com o Google: " + err.message);
     }
   };
 
+  const handleLinkPassword = async (e) => {
+    e.preventDefault();
+    setPasswordFeedback("");
+    if (!newPasswordInput || newPasswordInput.length < 6) {
+      setPasswordFeedback("A senha deve ter pelo menos 6 caracteres.");
+      return;
+    }
+    try {
+      if (auth.currentUser) {
+        await updatePassword(auth.currentUser, newPasswordInput);
+        setPasswordFeedback("Senha vinculada com sucesso! Agora você pode entrar com E-mail e Senha.");
+        setNewPasswordInput("");
+        setTimeout(() => {
+          setShowPasswordModal(false);
+          setPasswordFeedback("");
+        }, 2000);
+      }
+    } catch (err) {
+      setPasswordFeedback("Para definir a senha, saia e entre novamente com o Google para renovar a sessão.");
+    }
+  };
+
+  const handleChangeCycle = async (newCycle) => {
+    const validCycle = sanitizeCycle(newCycle);
+    setCurrentCycle(validCycle);
+    await saveUserData({ currentCycle: validCycle });
+  };
+
+  const getCycleLabel = (offset) => {
+    const validOffset = sanitizeCycle(offset);
+    const d = new Date();
+    d.setMonth(d.getMonth() + validOffset);
+    const str = d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  };
+
+  const getExpenseCycleStatus = (exp, cycle) => {
+    const totalInst = Math.max(1, toSafeInt(exp.installments, 1));
+    const rawTotal = toSafeNumber(exp.totalAmount ?? exp.amount, 0);
+    const rawInstVal = toSafeNumber(exp.installmentValue, 0);
+    const totalVal = rawTotal > 0 ? rawTotal : rawInstVal * totalInst;
+    const instVal = rawInstVal > 0 ? rawInstVal : totalVal / totalInst;
+    const start = sanitizeCycle(exp.startCycle);
+    const current = sanitizeCycle(cycle);
+    const elapsed = current - start;
+
+    if (elapsed < 0) {
+      return {
+        status: "future",
+        currentInstallment: 0,
+        totalInstallments: totalInst,
+        remainingInstallments: totalInst,
+        monthlyCharge: 0,
+        remainingAmount: totalVal,
+      };
+    }
+
+    if (elapsed >= totalInst) {
+      return {
+        status: elapsed === totalInst ? "paid" : "archived",
+        currentInstallment: totalInst,
+        totalInstallments: totalInst,
+        remainingInstallments: 0,
+        monthlyCharge: 0,
+        remainingAmount: 0,
+      };
+    }
+
+    const currentInst = elapsed + 1;
+    const remainingInst = totalInst - elapsed;
+    const remainingAmt = Math.max(0, totalVal - elapsed * instVal);
+
+    return {
+      status: "active",
+      currentInstallment: currentInst,
+      totalInstallments: totalInst,
+      remainingInstallments: remainingInst,
+      monthlyCharge: instVal,
+      remainingAmount: remainingAmt,
+    };
+  };
+
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     setAuthError("");
+    setAuthSuccess("");
     try {
       localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
       if (isRegistering) {
@@ -413,6 +559,7 @@ export default function App() {
       paymentLabel,
       installments,
       installmentValue,
+      startCycle: sanitizeCycle(currentCycle),
       createdAt: new Date().toLocaleDateString("pt-BR"),
     };
 
@@ -506,18 +653,40 @@ export default function App() {
   };
 
   const totalFixed = fixedExpenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0);
-  const totalExpenses = expenses.reduce((acc, item) => acc + (Number(item.totalAmount) || 0), 0);
-  const totalMonthlyInstallments = expenses.reduce((acc, item) => acc + (Number(item.installmentValue) || 0), 0);
+
+  // Cálculos dinâmicos baseados no ciclo atual (currentCycle)
+  const totalExpenses = expenses.reduce((acc, item) => {
+    const info = getExpenseCycleStatus(item, currentCycle);
+    return acc + info.remainingAmount;
+  }, 0);
+
+  const totalMonthlyInstallments = expenses.reduce((acc, item) => {
+    const info = getExpenseCycleStatus(item, currentCycle);
+    return acc + info.monthlyCharge;
+  }, 0);
+
   const totalSpentMonth = totalFixed + totalMonthlyInstallments;
   const remainingSalary = salary - totalSpentMonth;
 
-  // Cálculos para o cartão selecionado
+  // Cálculos para o cartão selecionado considerando parcelas já abatidas nos ciclos
   const selectedCardObj = cards.find((c) => c.id === selectedCardIdForDetails) || cards[0];
   const selectedCardLimit = selectedCardObj ? Number(selectedCardObj.limit) || 0 : 0;
   const selectedCardUsed = selectedCardObj
-    ? expenses.filter((e) => e.paymentSource === selectedCardObj.id).reduce((acc, e) => acc + (Number(e.totalAmount) || 0), 0)
+    ? expenses
+        .filter((e) => e.paymentSource === selectedCardObj.id)
+        .reduce((acc, e) => {
+          const info = getExpenseCycleStatus(e, currentCycle);
+          return acc + info.remainingAmount;
+        }, 0)
     : 0;
   const selectedCardAvailable = selectedCardLimit - selectedCardUsed;
+
+  const displayedExpenses = expenses.filter((exp) => {
+    const info = getExpenseCycleStatus(exp, currentCycle);
+    if (info.status === "archived") return false;
+    if (showOnlyActiveInCycle) return info.status === "active";
+    return true;
+  });
 
   if (loadingAuth) {
     return (
@@ -547,6 +716,12 @@ export default function App() {
             </div>
           )}
 
+          {authSuccess && (
+            <div className="mb-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-sm cursor-default">
+              {authSuccess}
+            </div>
+          )}
+
           <form onSubmit={handleEmailAuth} className="space-y-4">
             {isRegistering && (
               <div>
@@ -573,7 +748,9 @@ export default function App() {
               />
             </div>
             <div>
-              <label className="block text-sm mb-1 text-slate-600 dark:text-slate-400 cursor-default">Senha</label>
+              <label className="block text-sm mb-1 text-slate-600 dark:text-slate-400 cursor-default">
+                {isRegistering ? "Senha (também usada se registrar com Google)" : "Senha"}
+              </label>
               <input
                 type="password"
                 required
@@ -593,7 +770,7 @@ export default function App() {
 
           <div className="my-4 flex items-center gap-2">
             <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
-            <span className="text-xs text-slate-400 cursor-default">OU</span>
+            <span className="text-xs text-slate-400 cursor-default">OU ACESSO RÁPIDO</span>
             <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
           </div>
 
@@ -602,14 +779,17 @@ export default function App() {
             type="button"
             className="w-full py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-900 dark:text-white font-medium transition flex items-center justify-center gap-2 cursor-pointer"
           >
-            Entrar com Google
+            {isRegistering ? "Cadastrar com Google (Vincular Senha)" : "Entrar com Google"}
           </button>
 
           <p className="mt-4 text-center text-sm text-slate-500 cursor-default">
             {isRegistering ? "Já possui conta?" : "Ainda não tem conta?"}{" "}
             <button
               type="button"
-              onClick={() => setIsRegistering(!isRegistering)}
+              onClick={() => {
+                setIsRegistering(!isRegistering);
+                setAuthError("");
+              }}
               className="text-emerald-500 font-medium hover:underline cursor-pointer"
             >
               {isRegistering ? "Fazer Login" : "Cadastre-se"}
@@ -672,6 +852,17 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => {
+                setShowPasswordModal(true);
+                setPasswordFeedback("");
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer"
+              title="Definir senha para login direto por e-mail"
+            >
+              <KeyRound size={15} /> Senha
+            </button>
+
+            <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-red-500/10 text-red-500 hover:bg-red-500/20 cursor-pointer"
             >
@@ -680,6 +871,46 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {showPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 select-none">
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-emerald-500">
+                <KeyRound size={18} />
+                <h3 className="font-bold text-slate-900 dark:text-white text-sm">Definir Senha de Acesso</h3>
+              </div>
+              <button onClick={() => setShowPasswordModal(false)} className="text-slate-400 hover:text-slate-200 cursor-pointer">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+              Defina uma senha para entrar diretamente com seu e-mail ({user.email}) sem precisar abrir a janela do Google.
+            </p>
+            {passwordFeedback && (
+              <div className="mb-3 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs">
+                {passwordFeedback}
+              </div>
+            )}
+            <form onSubmit={handleLinkPassword} className="space-y-3">
+              <input
+                type="password"
+                required
+                placeholder="Nova senha (mín. 6 caracteres)"
+                value={newPasswordInput}
+                onChange={(e) => setNewPasswordInput(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+              />
+              <button
+                type="submit"
+                className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
+              >
+                Salvar Senha
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {viewMode === "code" && user.role === "superadmin" ? (
         <main className="max-w-7xl mx-auto p-4 select-none">
@@ -743,6 +974,58 @@ export default function App() {
         </main>
       ) : (
         <main className="max-w-7xl mx-auto p-4 space-y-6 select-none">
+          {/* BARRA DE CONTROLE DE CICLO MENSAL */}
+          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500">
+                <Calendar size={18} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-slate-900 dark:text-white">
+                    Ciclo: {getCycleLabel(currentCycle)}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                    {sanitizeCycle(currentCycle) === 0
+                      ? "Mês Inicial"
+                      : sanitizeCycle(currentCycle) > 0
+                      ? `+${sanitizeCycle(currentCycle)} ${sanitizeCycle(currentCycle) === 1 ? "mês" : "meses"}`
+                      : `${sanitizeCycle(currentCycle)} ${sanitizeCycle(currentCycle) === -1 ? "mês" : "meses"}`}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Avance o ciclo para abater parcelas pagas, atualizar os números e liberar o limite dos cartões.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleChangeCycle(sanitizeCycle(currentCycle) - 1)}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium cursor-pointer transition"
+              >
+                <ChevronLeft size={14} /> Mês Anterior
+              </button>
+
+              {sanitizeCycle(currentCycle) !== 0 && (
+                <button
+                  onClick={() => handleChangeCycle(0)}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-xs font-medium cursor-pointer transition"
+                  title="Voltar ao mês inicial"
+                >
+                  <RotateCcw size={13} /> Atual
+                </button>
+              )}
+
+              <button
+                onClick={() => handleChangeCycle(sanitizeCycle(currentCycle) + 1)}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer transition shadow-sm"
+              >
+                Virar Mês <ChevronRight size={14} />
+              </button>
+            </div>
+          </section>
+
           {/* TOPO: 3 PAINÉIS LADO A LADO COM A MESMA ALTURA / TAMANHO (SALÁRIO, CARTÕES, TOTAL DE GASTOS) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             
@@ -951,7 +1234,7 @@ export default function App() {
                     <span className="font-medium">{formatBRL(totalMonthlyInstallments)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Total Acumulado:</span>
+                    <span className="text-slate-500">Restante Acumulado:</span>
                     <span className="font-medium">{formatBRL(totalExpenses)}</span>
                   </div>
                 </div>
@@ -1105,9 +1388,22 @@ export default function App() {
             {/* 2. HISTÓRICO DE GASTOS, TOTAL E PARCELAS */}
             <div className="lg:col-span-7 flex flex-col">
               <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col h-full min-h-[420px]">
-                <div className="flex items-center gap-2 mb-4 text-amber-500 cursor-default">
-                  <Layers size={20} />
-                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Histórico de Gastos, Total e Parcelas</h2>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+                  <div className="flex items-center gap-2 text-amber-500 cursor-default">
+                    <Layers size={20} />
+                    <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Histórico de Gastos, Total e Parcelas</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowOnlyActiveInCycle(!showOnlyActiveInCycle)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium border cursor-pointer transition ${
+                      showOnlyActiveInCycle
+                        ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                        : "border-slate-300 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    {showOnlyActiveInCycle ? "Mostrando: Ativos no Mês" : "Mostrar apenas ativos no mês"}
+                  </button>
                 </div>
 
                 <div className="overflow-x-auto overflow-y-auto flex-1 max-h-[380px]">
@@ -1118,21 +1414,24 @@ export default function App() {
                         <th className="py-2 cursor-default">Onde</th>
                         <th className="py-2 cursor-default">Categoria</th>
                         <th className="py-2 cursor-default">Pagamento</th>
-                        <th className="py-2 cursor-default">Parcelas</th>
+                        <th className="py-2 cursor-default">Ciclo / Parcelas</th>
                         <th className="py-2 cursor-default">Total</th>
                         <th className="py-2 text-right cursor-default">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                      {expenses.length === 0 ? (
+                      {displayedExpenses.length === 0 ? (
                         <tr>
                           <td colSpan={7} className="py-6 text-center text-xs text-slate-500 cursor-default">
-                            Nenhum gasto registrado até o momento.
+                            Nenhum gasto registrado para este ciclo.
                           </td>
                         </tr>
                       ) : (
-                        expenses.map((exp) => (
-                          <tr key={exp.id}>
+                        displayedExpenses.map((exp) => {
+                          const cycleInfo = getExpenseCycleStatus(exp, currentCycle);
+                          const isPaid = cycleInfo.status === "paid";
+                          return (
+                          <tr key={exp.id} className={isPaid ? "opacity-50" : ""}>
                             {editingExpId === exp.id ? (
                               <>
                                 <td className="py-2 pr-1">
@@ -1206,47 +1505,83 @@ export default function App() {
                               </>
                             ) : (
                               <>
-                                <td className="py-3 font-medium cursor-default">{exp.what}</td>
-                                <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
-                                <td className="py-3 cursor-default">
-                                  <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
-                                    {exp.category || "Geral"}
-                                  </span>
-                                </td>
-                                <td className="py-3 cursor-default">{exp.paymentLabel}</td>
-                                <td className="py-3 cursor-default">
-                                  {Number(exp.installments) > 1 ? (
+                                {(() => {
+                                  const isFuture = cycleInfo.status === "future";
+                                  return (
                                     <>
-                                      {exp.installments}x de{" "}
-                                      <span className="font-medium cursor-default">
-                                        {formatBRL(exp.installmentValue)}
-                                      </span>
+                                      <td className={`py-3 font-medium cursor-default ${isPaid ? "line-through text-slate-400" : ""}`}>
+                                        {exp.what}
+                                      </td>
+                                      <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
+                                      <td className="py-3 cursor-default">
+                                        <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
+                                          {exp.category || "Geral"}
+                                        </span>
+                                      </td>
+                                      <td className="py-3 cursor-default">{exp.paymentLabel}</td>
+                                      <td className="py-3 cursor-default">
+                                        {isPaid ? (
+                                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold text-[11px]">
+                                            <CheckCircle2 size={12} /> Quitado ({cycleInfo.totalInstallments}/{cycleInfo.totalInstallments})
+                                          </span>
+                                        ) : isFuture ? (
+                                          <span className="text-slate-400 text-[11px]">
+                                            Inicia em ciclo futuro ({cycleInfo.totalInstallments}x)
+                                          </span>
+                                        ) : Number(exp.installments) > 1 ? (
+                                          <div>
+                                            <span className="font-bold text-amber-500">
+                                              {cycleInfo.currentInstallment}/{cycleInfo.totalInstallments}
+                                            </span>{" "}
+                                            de{" "}
+                                            <span className="font-medium cursor-default">
+                                              {formatBRL(exp.installmentValue)}
+                                            </span>
+                                          </div>
+                                        ) : (
+                                          <span className="cursor-default font-medium text-emerald-400">
+                                            1/1 (À vista)
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="py-3 font-bold cursor-default">
+                                        {isPaid ? (
+                                          <span className="text-emerald-500 text-xs">R$ 0,00</span>
+                                        ) : (
+                                          <div>
+                                            <span>{formatBRL(cycleInfo.remainingAmount)}</span>
+                                            {Number(exp.installments) > 1 && cycleInfo.currentInstallment > 1 && (
+                                              <span className="block text-[10px] font-normal text-slate-400">
+                                                de {formatBRL(exp.totalAmount)}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                      </td>
+                                      <td className="py-3 text-right space-x-2">
+                                        <button
+                                          onClick={() => startEditExpense(exp)}
+                                          className="text-slate-400 hover:text-amber-500 cursor-pointer"
+                                          title="Editar gasto"
+                                        >
+                                          <Pencil size={14} />
+                                        </button>
+                                        <button
+                                          onClick={() => handleRemoveExpense(exp.id)}
+                                          className="text-slate-400 hover:text-red-500 cursor-pointer"
+                                          title="Excluir gasto"
+                                        >
+                                          <Trash2 size={15} />
+                                        </button>
+                                      </td>
                                     </>
-                                  ) : (
-                                    <span className="cursor-default">À vista</span>
-                                  )}
-                                </td>
-                                <td className="py-3 font-bold cursor-default">{formatBRL(exp.totalAmount)}</td>
-                                <td className="py-3 text-right space-x-2">
-                                  <button
-                                    onClick={() => startEditExpense(exp)}
-                                    className="text-slate-400 hover:text-amber-500 cursor-pointer"
-                                    title="Editar gasto"
-                                  >
-                                    <Pencil size={14} />
-                                  </button>
-                                  <button
-                                    onClick={() => handleRemoveExpense(exp.id)}
-                                    className="text-slate-400 hover:text-red-500 cursor-pointer"
-                                    title="Excluir gasto"
-                                  >
-                                    <Trash2 size={15} />
-                                  </button>
-                                </td>
+                                  );
+                                })()}
                               </>
                             )}
                           </tr>
-                        ))
+                        );
+                        })
                       )}
                     </tbody>
                   </table>
