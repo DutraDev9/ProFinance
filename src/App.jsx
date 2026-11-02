@@ -151,6 +151,19 @@ export default function App() {
   }, [darkMode]);
 
   useEffect(() => {
+    document.title = "Controle Financeiro";
+    const walletSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2310b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>`;
+    let link = document.querySelector("link[rel~='icon']");
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.type = "image/svg+xml";
+    link.href = `data:image/svg+xml,${walletSvg}`;
+  }, []);
+
+  useEffect(() => {
     let logoutTimer = null;
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       const loginTimestamp = localStorage.getItem(SESSION_STORAGE_KEY);
@@ -614,38 +627,40 @@ export default function App() {
           <div>
             <h1 className="text-lg font-bold cursor-default text-center sm:text-left">Controle Financeiro</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 cursor-default text-center sm:text-left">
-              Olá, {user.name} ({user.email})
+              Olá, {user.name}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-            <div className="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg text-xs font-medium">
-              <button
-                onClick={() => setViewMode("preview")}
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "preview" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
-              >
-                <Eye size={14} /> Prévia
-              </button>
-              <button
-                onClick={() => setViewMode("code")}
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "code" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
-              >
-                <Code size={14} /> Código
-              </button>
-            </div>
-
             {user.role === "superadmin" && (
-              <button
-                onClick={() => {
-                  const next = activeView === "dashboard" ? "superadmin" : "dashboard";
-                  setActiveView(next);
-                  if (next === "superadmin") loadAllUsers();
-                }}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-amber-500/10 text-amber-500 border border-amber-500/30 cursor-pointer"
-              >
-                <ShieldAlert size={16} />
-                {activeView === "superadmin" ? "Voltar ao Painel" : "SuperAdmin"}
-              </button>
+              <>
+                <div className="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg text-xs font-medium">
+                  <button
+                    onClick={() => setViewMode("preview")}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "preview" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
+                  >
+                    <Eye size={14} /> Prévia
+                  </button>
+                  <button
+                    onClick={() => setViewMode("code")}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "code" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
+                  >
+                    <Code size={14} /> Código
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => {
+                    const next = activeView === "dashboard" ? "superadmin" : "dashboard";
+                    setActiveView(next);
+                    if (next === "superadmin") loadAllUsers();
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-amber-500/10 text-amber-500 border border-amber-500/30 cursor-pointer"
+                >
+                  <ShieldAlert size={16} />
+                  {activeView === "superadmin" ? "Voltar ao Painel" : "SuperAdmin"}
+                </button>
+              </>
             )}
 
             <button
@@ -666,7 +681,7 @@ export default function App() {
         </div>
       </header>
 
-      {viewMode === "code" ? (
+      {viewMode === "code" && user.role === "superadmin" ? (
         <main className="max-w-7xl mx-auto p-4 select-none">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6">
             <h2 className="text-base font-bold mb-2 cursor-default">Código Atual (`src/App.jsx`)</h2>
@@ -1251,24 +1266,29 @@ export default function App() {
               <span className="text-sm font-semibold text-slate-500 cursor-default">{formatBRL(totalFixed)}</span>
             </div>
 
-            <form onSubmit={handleAddFixed} className="flex gap-2 mb-4">
+            <form onSubmit={handleAddFixed} className="flex flex-col sm:flex-row gap-2 mb-4">
               <input
                 type="text"
                 placeholder="Aluguel, Luz, Academia..."
                 value={fixedName}
                 onChange={(e) => setFixedName(e.target.value)}
-                className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                className="w-full sm:flex-1 min-w-0 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
               />
-              <input
-                type="text"
-                placeholder="Valor (R$)"
-                value={fixedAmount}
-                onChange={(e) => setFixedAmount(maskCurrencyInput(e.target.value))}
-                className="w-32 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-              />
-              <button type="submit" className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium cursor-pointer flex items-center gap-1">
-                <Plus size={16} /> Adicionar
-              </button>
+              <div className="flex gap-2 w-full sm:w-auto">
+                <input
+                  type="text"
+                  placeholder="Valor (R$)"
+                  value={fixedAmount}
+                  onChange={(e) => setFixedAmount(maskCurrencyInput(e.target.value))}
+                  className="flex-1 sm:w-32 min-w-0 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                />
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium cursor-pointer flex items-center justify-center gap-1 shrink-0"
+                >
+                  <Plus size={16} /> Adicionar
+                </button>
+              </div>
             </form>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
