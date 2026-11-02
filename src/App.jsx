@@ -35,8 +35,9 @@ import {
   X,
 } from "lucide-react";
 
-const SUPERADMIN_EMAILS = ["admin@financas.com"];
-const SESSION_DURATION_MS = 10 * 60 * 1000; // 10 minutos em milissegundos
+// Conta SuperAdmin solicitada
+const SUPERADMIN_EMAILS = ["dumaster@teste.com", "admin@financas.com"];
+const SESSION_DURATION_MS = 10 * 60 * 1000; // 10 minutos
 const SESSION_STORAGE_KEY = "pfc_login_timestamp";
 
 const formatBRL = (value) => {
@@ -61,31 +62,31 @@ export default function App() {
   // Aba ativa (dashboard ou superadmin)
   const [activeView, setActiveView] = useState("dashboard");
 
-  // Dados Financeiros do Usuário (Tudo começa zerado)
+  // Dados Financeiros do Usuário
   const [salary, setSalary] = useState(0);
   const [fixedExpenses, setFixedExpenses] = useState([]);
   const [cards, setCards] = useState([]);
   const [expenses, setExpenses] = useState([]);
 
-  // Edição do Salário no próprio painel
+  // Edição do Salário
   const [isEditingSalary, setIsEditingSalary] = useState(false);
   const [salaryInput, setSalaryInput] = useState("");
 
-  // Inputs e Edição de Despesas Fixas
+  // Despesas Fixas
   const [fixedName, setFixedName] = useState("");
   const [fixedAmount, setFixedAmount] = useState("");
   const [editingFixedId, setEditingFixedId] = useState(null);
   const [editFixedName, setEditFixedName] = useState("");
   const [editFixedAmount, setEditFixedAmount] = useState("");
 
-  // Inputs e Edição de Cartões de Crédito
+  // Cartões
   const [cardName, setCardName] = useState("");
   const [cardLimit, setCardLimit] = useState("");
   const [editingCardId, setEditingCardId] = useState(null);
   const [editCardName, setEditCardName] = useState("");
   const [editCardLimit, setEditCardLimit] = useState("");
 
-  // Inputs e Edição de Gastos (Começa tudo vazio/zerado, sem forçar 1)
+  // Gastos
   const [expWhat, setExpWhat] = useState("");
   const [expWhere, setExpWhere] = useState("");
   const [expAmount, setExpAmount] = useState("");
@@ -99,7 +100,6 @@ export default function App() {
   const [editExpInstallments, setEditExpInstallments] = useState("");
   const [editExpPaymentSource, setEditExpPaymentSource] = useState("salary");
 
-  // Lista de usuários para o SuperAdmin
   const [allUsers, setAllUsers] = useState([]);
 
   useEffect(() => {
@@ -110,7 +110,7 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Controle de Sessão: Nunca começa logado sem um login válido nos últimos 10 minutos
+  // Controle de Sessão de 10 minutos
   useEffect(() => {
     let logoutTimer = null;
 
@@ -132,13 +132,11 @@ export default function App() {
             setUser(null);
           }, remainingTime);
         } else {
-          // Sessão de 10 minutos expirou
           localStorage.removeItem(SESSION_STORAGE_KEY);
           await signOut(auth);
           setUser(null);
         }
       } else {
-        // Garante que nunca inicie logado sem ter passado pela tela de login
         if (currentUser) {
           await signOut(auth);
         }
@@ -168,7 +166,7 @@ export default function App() {
         uid: firebaseUser.uid,
         name: data.name || firebaseUser.displayName || "Usuário",
         email: firebaseUser.email,
-        role: data.role || (isSuperAdmin ? "superadmin" : "user"),
+        role: isSuperAdmin ? "superadmin" : (data.role || "user"),
       });
       setSalary(loadedSalary);
       setSalaryInput(loadedSalary === 0 ? "" : String(loadedSalary));
@@ -205,7 +203,6 @@ export default function App() {
     await setDoc(userRef, updatedFields, { merge: true });
   };
 
-  // Login com Google (Registra o início dos 10 minutos)
   const handleGoogleLogin = async () => {
     setAuthError("");
     try {
@@ -217,7 +214,6 @@ export default function App() {
     }
   };
 
-  // Login ou Cadastro com E-mail e Senha (Registra o início dos 10 minutos)
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     setAuthError("");
@@ -248,7 +244,6 @@ export default function App() {
     setUser(null);
   };
 
-  // --- FUNÇÕES DO PAINEL DE SALÁRIO ---
   const handleSaveSalary = async (e) => {
     if (e) e.preventDefault();
     const num = Number(salaryInput) || 0;
@@ -257,7 +252,6 @@ export default function App() {
     await saveUserData({ salary: num });
   };
 
-  // --- FUNÇÕES DO PAINEL DE DESPESAS FIXAS ---
   const handleAddFixed = async (e) => {
     e.preventDefault();
     if (!fixedName.trim() || fixedAmount === "") return;
@@ -303,7 +297,6 @@ export default function App() {
     await saveUserData({ fixedExpenses: updated });
   };
 
-  // --- FUNÇÕES DO PAINEL DE CARTÕES DE CRÉDITO ---
   const handleAddCard = async (e) => {
     e.preventDefault();
     if (!cardName.trim() || cardLimit === "") return;
@@ -333,7 +326,6 @@ export default function App() {
     const updatedCards = cards.map((c) =>
       c.id === id ? { ...c, name: newName, limit: Number(editCardLimit) || 0 } : c
     );
-    // Atualiza também o nome do cartão nos gastos vinculados a ele
     const updatedExpenses = expenses.map((exp) =>
       exp.paymentSource === id ? { ...exp, paymentLabel: newName } : exp
     );
@@ -350,7 +342,6 @@ export default function App() {
     await saveUserData({ cards: updated });
   };
 
-  // --- FUNÇÕES DO PAINEL DE GASTOS ---
   const handleAddExpense = async (e) => {
     e.preventDefault();
     if (!expWhat.trim() || !expWhere.trim() || expAmount === "") return;
@@ -425,7 +416,6 @@ export default function App() {
     await saveUserData({ expenses: updated });
   };
 
-  // --- FUNÇÕES SUPERADMIN ---
   const loadAllUsers = async () => {
     const snap = await getDocs(collection(db, "users"));
     const list = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
@@ -447,7 +437,6 @@ export default function App() {
     await loadAllUsers();
   };
 
-  // Cálculos de Totais
   const totalFixed = fixedExpenses.reduce(
     (acc, item) => acc + (Number(item.amount) || 0),
     0
@@ -677,9 +666,9 @@ export default function App() {
       ) : (
         /* DASHBOARD PRINCIPAL */
         <main className="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* COLUNA ESQUERDA: SALÁRIO + DESPESAS FIXAS LOGO ABAIXO + TOTAL DE GASTOS */}
+          {/* COLUNA ESQUERDA: SALÁRIO + DESPESAS FIXAS + TOTAL DE GASTOS */}
           <div className="lg:col-span-4 space-y-6">
-            {/* 1. PAINEL DE SALÁRIO (EDITÁVEL NO PRÓPRIO PAINEL) */}
+            {/* 1. PAINEL DE SALÁRIO */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2 text-emerald-500">
@@ -765,7 +754,7 @@ export default function App() {
               </div>
             </section>
 
-            {/* 2. PAINEL DE DESPESAS FIXAS (LOGO ABAIXO DO SALÁRIO + EDIÇÃO DIRETA) */}
+            {/* 2. PAINEL DE DESPESAS FIXAS */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2 text-blue-500">
@@ -916,9 +905,9 @@ export default function App() {
             </section>
           </div>
 
-          {/* COLUNA DIREITA: CARTÕES DE CRÉDITO + LANÇAR GASTO + LISTA DE GASTOS E PARCELAS */}
+          {/* COLUNA DIREITA: CARTÕES DE CRÉDITO + LANÇAR GASTO + HISTÓRICO */}
           <div className="lg:col-span-8 space-y-6">
-            {/* 4. PAINEL DE CARTÕES DE CRÉDITO E LIMITES (EDIÇÃO DIRETA NO CARD) */}
+            {/* 4. PAINEL DE CARTÕES DE CRÉDITO E LIMITES */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-4 text-purple-500">
                 <CreditCard size={20} />
@@ -1070,7 +1059,7 @@ export default function App() {
               </div>
             </section>
 
-            {/* 5. PAINEL PARA INFORMAR O QUE FOI GASTO, ONDE E QUANTO FOI */}
+            {/* 5. PAINEL PARA REGISTRAR NOVO GASTO */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-4 text-emerald-500">
                 <ShoppingBag size={20} />
@@ -1136,7 +1125,7 @@ export default function App() {
               </form>
             </section>
 
-            {/* 6. PAINEL INFORMANDO O QUE FOI GASTO, TOTAL E PARCELAS (COM EDIÇÃO DIRETA) */}
+            {/* 6. HISTÓRICO DE GASTOS */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-4 text-amber-500">
                 <Layers size={20} />
