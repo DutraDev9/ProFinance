@@ -30,10 +30,14 @@ import {
   ShoppingBag,
   Layers,
   Users,
+  Pencil,
+  Check,
+  X,
 } from "lucide-react";
 
-// Defina aqui o e-mail que terá acesso SuperAdmin automaticamente
 const SUPERADMIN_EMAILS = ["admin@financas.com"];
+const SESSION_DURATION_MS = 10 * 60 * 1000; // 10 minutos em milissegundos
+const SESSION_STORAGE_KEY = "pfc_login_timestamp";
 
 const formatBRL = (value) => {
   return Number(value || 0).toLocaleString("pt-BR", {
@@ -57,26 +61,43 @@ export default function App() {
   // Aba ativa (dashboard ou superadmin)
   const [activeView, setActiveView] = useState("dashboard");
 
-  // Dados Financeiros do Usuário
+  // Dados Financeiros do Usuário (Tudo começa zerado)
   const [salary, setSalary] = useState(0);
   const [fixedExpenses, setFixedExpenses] = useState([]);
   const [cards, setCards] = useState([]);
   const [expenses, setExpenses] = useState([]);
 
-  // Inputs de Despesas Fixas
+  // Edição do Salário no próprio painel
+  const [isEditingSalary, setIsEditingSalary] = useState(false);
+  const [salaryInput, setSalaryInput] = useState("");
+
+  // Inputs e Edição de Despesas Fixas
   const [fixedName, setFixedName] = useState("");
   const [fixedAmount, setFixedAmount] = useState("");
+  const [editingFixedId, setEditingFixedId] = useState(null);
+  const [editFixedName, setEditFixedName] = useState("");
+  const [editFixedAmount, setEditFixedAmount] = useState("");
 
-  // Inputs de Cartões de Crédito
+  // Inputs e Edição de Cartões de Crédito
   const [cardName, setCardName] = useState("");
   const [cardLimit, setCardLimit] = useState("");
+  const [editingCardId, setEditingCardId] = useState(null);
+  const [editCardName, setEditCardName] = useState("");
+  const [editCardLimit, setEditCardLimit] = useState("");
 
-  // Inputs de Gastos
+  // Inputs e Edição de Gastos (Começa tudo vazio/zerado, sem forçar 1)
   const [expWhat, setExpWhat] = useState("");
   const [expWhere, setExpWhere] = useState("");
   const [expAmount, setExpAmount] = useState("");
-  const [expInstallments, setExpInstallments] = useState(1);
+  const [expInstallments, setExpInstallments] = useState("");
   const [expPaymentSource, setExpPaymentSource] = useState("salary");
+
+  const [editingExpId, setEditingExpId] = useState(null);
+  const [editExpWhat, setEditExpWhat] = useState("");
+  const [editExpWhere, setEditExpWhere] = useState("");
+  const [editExpAmount, setEditExpAmount] = useState("");
+  const [editExpInstallments, setEditExpInstallments] = useState("");
+  const [editExpPaymentSource, setEditExpPaymentSource] = useState("salary");
 
   // Lista de usuários para o SuperAdmin
   const [allUsers, setAllUsers] = useState([]);
@@ -89,17 +110,49 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Monitora autenticação no Firebase
+  // Controle de Sessão: Nunca começa logado sem um login válido nos últimos 10 minutos
   useEffect(() => {
+    let logoutTimer = null;
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (currentUser) {
-        await loadOrCreateUserData(currentUser);
+      const loginTimestamp = localStorage.getItem(SESSION_STORAGE_KEY);
+      const now = Date.now();
+
+      if (currentUser && loginTimestamp) {
+        const elapsed = now - Number(loginTimestamp);
+
+        if (elapsed < SESSION_DURATION_MS) {
+          await loadOrCreateUserData(currentUser);
+          const remainingTime = SESSION_DURATION_MS - elapsed;
+
+          if (logoutTimer) clearTimeout(logoutTimer);
+          logoutTimer = setTimeout(async () => {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+            await signOut(auth);
+            setUser(null);
+          }, remainingTime);
+        } else {
+          // Sessão de 10 minutos expirou
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+          await signOut(auth);
+          setUser(null);
+        }
       } else {
+        // Garante que nunca inicie logado sem ter passado pela tela de login
+        if (currentUser) {
+          await signOut(auth);
+        }
+        localStorage.removeItem(SESSION_STORAGE_KEY);
         setUser(null);
       }
+
       setLoadingAuth(false);
     });
-    return () => unsubscribe();
+
+    return () => {
+      if (logoutTimer) clearTimeout(logoutTimer);
+      unsubscribe();
+    };
   }, []);
 
   const loadOrCreateUserData = async (firebaseUser) => {
@@ -110,13 +163,15 @@ export default function App() {
 
     if (snap.exists()) {
       const data = snap.data();
+      const loadedSalary = Number(data.salary || 0);
       setUser({
         uid: firebaseUser.uid,
         name: data.name || firebaseUser.displayName || "Usuário",
         email: firebaseUser.email,
         role: data.role || (isSuperAdmin ? "superadmin" : "user"),
       });
-      setSalary(data.salary || 0);
+      setSalary(loadedSalary);
+      setSalaryInput(loadedSalary === 0 ? "" : String(loadedSalary));
       setFixedExpenses(data.fixedExpenses || []);
       setCards(data.cards || []);
       setExpenses(data.expenses || []);
@@ -137,34 +192,37 @@ export default function App() {
         ...initialData,
       });
       setSalary(0);
+      setSalaryInput("");
       setFixedExpenses([]);
       setCards([]);
       setExpenses([]);
     }
   };
 
-  // Salva alterações no Firestore
   const saveUserData = async (updatedFields) => {
     if (!user) return;
     const userRef = doc(db, "users", user.uid);
     await setDoc(userRef, updatedFields, { merge: true });
   };
 
-  // Login com Google
+  // Login com Google (Registra o início dos 10 minutos)
   const handleGoogleLogin = async () => {
     setAuthError("");
     try {
+      localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
       setAuthError("Erro ao autenticar com o Google: " + err.message);
     }
   };
 
-  // Login ou Cadastro com E-mail e Senha
+  // Login ou Cadastro com E-mail e Senha (Registra o início dos 10 minutos)
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     setAuthError("");
     try {
+      localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
       if (isRegistering) {
         const cred = await createUserWithEmailAndPassword(
           auth,
@@ -179,32 +237,63 @@ export default function App() {
         await signInWithEmailAndPassword(auth, emailInput, passwordInput);
       }
     } catch (err) {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
       setAuthError("Falha na autenticação: " + err.message);
     }
   };
 
-  // Funções de Salário
-  const handleSalaryChange = async (val) => {
-    const num = Number(val) || 0;
+  const handleLogout = async () => {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    await signOut(auth);
+    setUser(null);
+  };
+
+  // --- FUNÇÕES DO PAINEL DE SALÁRIO ---
+  const handleSaveSalary = async (e) => {
+    if (e) e.preventDefault();
+    const num = Number(salaryInput) || 0;
     setSalary(num);
+    setIsEditingSalary(false);
     await saveUserData({ salary: num });
   };
 
-  // Funções de Despesas Fixas
+  // --- FUNÇÕES DO PAINEL DE DESPESAS FIXAS ---
   const handleAddFixed = async (e) => {
     e.preventDefault();
-    if (!fixedName.trim() || !fixedAmount) return;
+    if (!fixedName.trim() || fixedAmount === "") return;
     const updated = [
       ...fixedExpenses,
       {
         id: Date.now().toString(),
         name: fixedName.trim(),
-        amount: Number(fixedAmount),
+        amount: Number(fixedAmount) || 0,
       },
     ];
     setFixedExpenses(updated);
     setFixedName("");
     setFixedAmount("");
+    await saveUserData({ fixedExpenses: updated });
+  };
+
+  const startEditFixed = (item) => {
+    setEditingFixedId(item.id);
+    setEditFixedName(item.name);
+    setEditFixedAmount(String(item.amount));
+  };
+
+  const handleSaveFixedEdit = async (id) => {
+    if (!editFixedName.trim()) return;
+    const updated = fixedExpenses.map((item) =>
+      item.id === id
+        ? {
+            ...item,
+            name: editFixedName.trim(),
+            amount: Number(editFixedAmount) || 0,
+          }
+        : item
+    );
+    setFixedExpenses(updated);
+    setEditingFixedId(null);
     await saveUserData({ fixedExpenses: updated });
   };
 
@@ -214,16 +303,16 @@ export default function App() {
     await saveUserData({ fixedExpenses: updated });
   };
 
-  // Funções de Cartão de Crédito
+  // --- FUNÇÕES DO PAINEL DE CARTÕES DE CRÉDITO ---
   const handleAddCard = async (e) => {
     e.preventDefault();
-    if (!cardName.trim() || !cardLimit) return;
+    if (!cardName.trim() || cardLimit === "") return;
     const updated = [
       ...cards,
       {
         id: Date.now().toString(),
         name: cardName.trim(),
-        limit: Number(cardLimit),
+        limit: Number(cardLimit) || 0,
       },
     ];
     setCards(updated);
@@ -232,19 +321,43 @@ export default function App() {
     await saveUserData({ cards: updated });
   };
 
+  const startEditCard = (card) => {
+    setEditingCardId(card.id);
+    setEditCardName(card.name);
+    setEditCardLimit(String(card.limit));
+  };
+
+  const handleSaveCardEdit = async (id) => {
+    if (!editCardName.trim()) return;
+    const newName = editCardName.trim();
+    const updatedCards = cards.map((c) =>
+      c.id === id ? { ...c, name: newName, limit: Number(editCardLimit) || 0 } : c
+    );
+    // Atualiza também o nome do cartão nos gastos vinculados a ele
+    const updatedExpenses = expenses.map((exp) =>
+      exp.paymentSource === id ? { ...exp, paymentLabel: newName } : exp
+    );
+
+    setCards(updatedCards);
+    setExpenses(updatedExpenses);
+    setEditingCardId(null);
+    await saveUserData({ cards: updatedCards, expenses: updatedExpenses });
+  };
+
   const handleRemoveCard = async (id) => {
     const updated = cards.filter((c) => c.id !== id);
     setCards(updated);
     await saveUserData({ cards: updated });
   };
 
-  // Funções de Gastos
+  // --- FUNÇÕES DO PAINEL DE GASTOS ---
   const handleAddExpense = async (e) => {
     e.preventDefault();
-    if (!expWhat.trim() || !expWhere.trim() || !expAmount) return;
+    if (!expWhat.trim() || !expWhere.trim() || expAmount === "") return;
 
-    const total = Number(expAmount);
-    const installments = Math.max(1, Number(expInstallments) || 1);
+    const total = Number(expAmount) || 0;
+    const installments = Number(expInstallments) || 0;
+    const installmentValue = installments > 0 ? total / installments : total;
     const selectedCard = cards.find((c) => c.id === expPaymentSource);
 
     const newExpense = {
@@ -253,7 +366,7 @@ export default function App() {
       where: expWhere.trim(),
       totalAmount: total,
       installments,
-      installmentValue: total / installments,
+      installmentValue,
       paymentSource: expPaymentSource,
       paymentLabel: selectedCard ? selectedCard.name : "Salário / À Vista",
       createdAt: new Date().toLocaleDateString("pt-BR"),
@@ -264,7 +377,45 @@ export default function App() {
     setExpWhat("");
     setExpWhere("");
     setExpAmount("");
-    setExpInstallments(1);
+    setExpInstallments("");
+    await saveUserData({ expenses: updated });
+  };
+
+  const startEditExpense = (exp) => {
+    setEditingExpId(exp.id);
+    setEditExpWhat(exp.what);
+    setEditExpWhere(exp.where);
+    setEditExpAmount(String(exp.totalAmount));
+    setEditExpInstallments(String(exp.installments || 0));
+    setEditExpPaymentSource(exp.paymentSource || "salary");
+  };
+
+  const handleSaveExpenseEdit = async (id) => {
+    if (!editExpWhat.trim() || !editExpWhere.trim()) return;
+    const total = Number(editExpAmount) || 0;
+    const installments = Number(editExpInstallments) || 0;
+    const installmentValue = installments > 0 ? total / installments : total;
+    const selectedCard = cards.find((c) => c.id === editExpPaymentSource);
+
+    const updated = expenses.map((exp) =>
+      exp.id === id
+        ? {
+            ...exp,
+            what: editExpWhat.trim(),
+            where: editExpWhere.trim(),
+            totalAmount: total,
+            installments,
+            installmentValue,
+            paymentSource: editExpPaymentSource,
+            paymentLabel: selectedCard
+              ? selectedCard.name
+              : "Salário / À Vista",
+          }
+        : exp
+    );
+
+    setExpenses(updated);
+    setEditingExpId(null);
     await saveUserData({ expenses: updated });
   };
 
@@ -274,7 +425,7 @@ export default function App() {
     await saveUserData({ expenses: updated });
   };
 
-  // Funções SuperAdmin
+  // --- FUNÇÕES SUPERADMIN ---
   const loadAllUsers = async () => {
     const snap = await getDocs(collection(db, "users"));
     const list = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
@@ -297,13 +448,16 @@ export default function App() {
   };
 
   // Cálculos de Totais
-  const totalFixed = fixedExpenses.reduce((acc, item) => acc + item.amount, 0);
+  const totalFixed = fixedExpenses.reduce(
+    (acc, item) => acc + (Number(item.amount) || 0),
+    0
+  );
   const totalExpenses = expenses.reduce(
-    (acc, item) => acc + item.totalAmount,
+    (acc, item) => acc + (Number(item.totalAmount) || 0),
     0
   );
   const totalMonthlyInstallments = expenses.reduce(
-    (acc, item) => acc + item.installmentValue,
+    (acc, item) => acc + (Number(item.installmentValue) || 0),
     0
   );
   const totalSpentMonth = totalFixed + totalMonthlyInstallments;
@@ -351,7 +505,7 @@ export default function App() {
                   required
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
                   placeholder="Seu nome"
                 />
               </div>
@@ -365,7 +519,7 @@ export default function App() {
                 required
                 value={emailInput}
                 onChange={(e) => setEmailInput(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
                 placeholder="seu@email.com"
               />
             </div>
@@ -378,7 +532,7 @@ export default function App() {
                 required
                 value={passwordInput}
                 onChange={(e) => setPasswordInput(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
                 placeholder="••••••••"
               />
             </div>
@@ -399,7 +553,7 @@ export default function App() {
           <button
             onClick={handleGoogleLogin}
             type="button"
-            className="w-full py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium transition flex items-center justify-center gap-2"
+            className="w-full py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-900 dark:text-white font-medium transition flex items-center justify-center gap-2"
           >
             Entrar com Google
           </button>
@@ -456,7 +610,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => signOut(auth)}
+              onClick={handleLogout}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-red-500/10 text-red-500 hover:bg-red-500/20"
             >
               <LogOut size={16} />
@@ -525,25 +679,78 @@ export default function App() {
         <main className="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* COLUNA ESQUERDA: SALÁRIO + DESPESAS FIXAS LOGO ABAIXO + TOTAL DE GASTOS */}
           <div className="lg:col-span-4 space-y-6">
-            {/* 1. PAINEL DE SALÁRIO */}
+            {/* 1. PAINEL DE SALÁRIO (EDITÁVEL NO PRÓPRIO PAINEL) */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-3 text-emerald-500">
-                <Wallet size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white">
-                  Painel de Salário
-                </h2>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-emerald-500">
+                  <Wallet size={20} />
+                  <h2 className="font-bold text-slate-900 dark:text-white">
+                    Painel de Salário
+                  </h2>
+                </div>
+                {!isEditingSalary && (
+                  <button
+                    onClick={() => {
+                      setSalaryInput(salary === 0 ? "" : String(salary));
+                      setIsEditingSalary(true);
+                    }}
+                    className="flex items-center gap-1 text-xs text-emerald-500 hover:underline"
+                  >
+                    <Pencil size={14} /> Editar
+                  </button>
+                )}
               </div>
-              <label className="block text-xs text-slate-500 mb-1">
-                Informe seu salário mensal (R$)
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={salary || ""}
-                onChange={(e) => handleSalaryChange(e.target.value)}
-                placeholder="Ex: 3500.00"
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-lg font-semibold"
-              />
+
+              {isEditingSalary ? (
+                <form onSubmit={handleSaveSalary} className="space-y-2">
+                  <label className="block text-xs text-slate-500">
+                    Digite manualmente seu salário mensal (R$)
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      autoFocus
+                      value={salaryInput}
+                      onChange={(e) => setSalaryInput(e.target.value)}
+                      placeholder="0.00"
+                      className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-base font-semibold"
+                    />
+                    <button
+                      type="submit"
+                      className="p-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white"
+                      title="Salvar Salário"
+                    >
+                      <Check size={18} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingSalary(false)}
+                      className="p-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-500"
+                      title="Cancelar"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div
+                  onClick={() => {
+                    setSalaryInput(salary === 0 ? "" : String(salary));
+                    setIsEditingSalary(true);
+                  }}
+                  className="cursor-pointer p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-transparent hover:border-emerald-500/40 transition"
+                >
+                  <span className="block text-xs text-slate-500 mb-0.5">
+                    Salário Mensal Atual (clique para editar)
+                  </span>
+                  <span className="text-2xl font-bold text-slate-900 dark:text-white">
+                    {formatBRL(salary)}
+                  </span>
+                </div>
+              )}
+
               <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 flex justify-between text-sm">
                 <span className="text-slate-500">Saldo livre estimado:</span>
                 <span
@@ -558,7 +765,7 @@ export default function App() {
               </div>
             </section>
 
-            {/* 2. PAINEL DE DESPESAS FIXAS (LOGO ABAIXO DO SALÁRIO) */}
+            {/* 2. PAINEL DE DESPESAS FIXAS (LOGO ABAIXO DO SALÁRIO + EDIÇÃO DIRETA) */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2 text-blue-500">
@@ -583,6 +790,7 @@ export default function App() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0"
                   placeholder="Valor"
                   value={fixedAmount}
                   onChange={(e) => setFixedAmount(e.target.value)}
@@ -591,6 +799,7 @@ export default function App() {
                 <button
                   type="submit"
                   className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white"
+                  title="Adicionar Despesa Fixa"
                 >
                   <Plus size={18} />
                 </button>
@@ -605,20 +814,63 @@ export default function App() {
                   fixedExpenses.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-sm"
+                      className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-sm"
                     >
-                      <span>{item.name}</span>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">
-                          {formatBRL(item.amount)}
-                        </span>
-                        <button
-                          onClick={() => handleRemoveFixed(item.id)}
-                          className="text-slate-400 hover:text-red-500"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
+                      {editingFixedId === item.id ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={editFixedName}
+                            onChange={(e) => setEditFixedName(e.target.value)}
+                            className="flex-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={editFixedAmount}
+                            onChange={(e) => setEditFixedAmount(e.target.value)}
+                            className="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                          />
+                          <button
+                            onClick={() => handleSaveFixedEdit(item.id)}
+                            className="text-emerald-500 hover:text-emerald-400"
+                            title="Salvar"
+                          >
+                            <Check size={16} />
+                          </button>
+                          <button
+                            onClick={() => setEditingFixedId(null)}
+                            className="text-slate-400 hover:text-slate-300"
+                            title="Cancelar"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between">
+                          <span>{item.name}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">
+                              {formatBRL(item.amount)}
+                            </span>
+                            <button
+                              onClick={() => startEditFixed(item)}
+                              className="text-slate-400 hover:text-blue-500"
+                              title="Editar despesa"
+                            >
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              onClick={() => handleRemoveFixed(item.id)}
+                              className="text-slate-400 hover:text-red-500"
+                              title="Excluir despesa"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -666,7 +918,7 @@ export default function App() {
 
           {/* COLUNA DIREITA: CARTÕES DE CRÉDITO + LANÇAR GASTO + LISTA DE GASTOS E PARCELAS */}
           <div className="lg:col-span-8 space-y-6">
-            {/* 4. PAINEL DE CARTÕES DE CRÉDITO E LIMITES */}
+            {/* 4. PAINEL DE CARTÕES DE CRÉDITO E LIMITES (EDIÇÃO DIRETA NO CARD) */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-4 text-purple-500">
                 <CreditCard size={20} />
@@ -689,6 +941,7 @@ export default function App() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0"
                   placeholder="Limite Total (R$)"
                   value={cardLimit}
                   onChange={(e) => setCardLimit(e.target.value)}
@@ -711,43 +964,105 @@ export default function App() {
                   cards.map((card) => {
                     const used = expenses
                       .filter((e) => e.paymentSource === card.id)
-                      .reduce((acc, e) => acc + e.totalAmount, 0);
-                    const available = card.limit - used;
+                      .reduce(
+                        (acc, e) => acc + (Number(e.totalAmount) || 0),
+                        0
+                      );
+                    const available = (Number(card.limit) || 0) - used;
 
                     return (
                       <div
                         key={card.id}
                         className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40"
                       >
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="font-bold">{card.name}</span>
-                          <button
-                            onClick={() => handleRemoveCard(card.id)}
-                            className="text-slate-400 hover:text-red-500"
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
-                        <div className="text-xs space-y-1 text-slate-500 dark:text-slate-400">
-                          <div className="flex justify-between">
-                            <span>Limite Total:</span>
-                            <span className="font-medium text-slate-900 dark:text-white">
-                              {formatBRL(card.limit)}
-                            </span>
+                        {editingCardId === card.id ? (
+                          <div className="space-y-2">
+                            <div>
+                              <label className="block text-[11px] text-slate-400">
+                                Nome do Cartão
+                              </label>
+                              <input
+                                type="text"
+                                value={editCardName}
+                                onChange={(e) =>
+                                  setEditCardName(e.target.value)
+                                }
+                                className="w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400">
+                                Limite Total (R$)
+                              </label>
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={editCardLimit}
+                                onChange={(e) =>
+                                  setEditCardLimit(e.target.value)
+                                }
+                                className="w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                              />
+                            </div>
+                            <div className="flex justify-end gap-2 pt-1">
+                              <button
+                                onClick={() => handleSaveCardEdit(card.id)}
+                                className="px-3 py-1 rounded bg-emerald-600 text-white text-xs flex items-center gap-1"
+                              >
+                                <Check size={14} /> Salvar
+                              </button>
+                              <button
+                                onClick={() => setEditingCardId(null)}
+                                className="px-3 py-1 rounded bg-slate-200 dark:bg-slate-700 text-xs flex items-center gap-1"
+                              >
+                                <X size={14} /> Cancelar
+                              </button>
+                            </div>
                           </div>
-                          <div className="flex justify-between">
-                            <span>Utilizado:</span>
-                            <span className="font-medium text-rose-500">
-                              {formatBRL(used)}
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Disponível:</span>
-                            <span className="font-medium text-emerald-500">
-                              {formatBRL(available)}
-                            </span>
-                          </div>
-                        </div>
+                        ) : (
+                          <>
+                            <div className="flex justify-between items-center mb-2">
+                              <span className="font-bold">{card.name}</span>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => startEditCard(card)}
+                                  className="text-slate-400 hover:text-purple-500"
+                                  title="Editar cartão"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  onClick={() => handleRemoveCard(card.id)}
+                                  className="text-slate-400 hover:text-red-500"
+                                  title="Excluir cartão"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="text-xs space-y-1 text-slate-500 dark:text-slate-400">
+                              <div className="flex justify-between">
+                                <span>Limite Total:</span>
+                                <span className="font-medium text-slate-900 dark:text-white">
+                                  {formatBRL(card.limit)}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Utilizado:</span>
+                                <span className="font-medium text-rose-500">
+                                  {formatBRL(used)}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Disponível:</span>
+                                <span className="font-medium text-emerald-500">
+                                  {formatBRL(available)}
+                                </span>
+                              </div>
+                            </div>
+                          </>
+                        )}
                       </div>
                     );
                   })
@@ -785,6 +1100,7 @@ export default function App() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0"
                   placeholder="Quanto foi? (Total R$)"
                   value={expAmount}
                   onChange={(e) => setExpAmount(e.target.value)}
@@ -804,9 +1120,9 @@ export default function App() {
                 </select>
                 <input
                   type="number"
-                  min="1"
+                  min="0"
                   max="48"
-                  placeholder="Parcelas (1 = à vista)"
+                  placeholder="Parcelas (0 = à vista)"
                   value={expInstallments}
                   onChange={(e) => setExpInstallments(e.target.value)}
                   className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
@@ -820,7 +1136,7 @@ export default function App() {
               </form>
             </section>
 
-            {/* 6. PAINEL INFORMANDO O QUE FOI GASTO, TOTAL E PARCELAS */}
+            {/* 6. PAINEL INFORMANDO O QUE FOI GASTO, TOTAL E PARCELAS (COM EDIÇÃO DIRETA) */}
             <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-4 text-amber-500">
                 <Layers size={20} />
@@ -838,7 +1154,7 @@ export default function App() {
                       <th className="py-2">Forma / Cartão</th>
                       <th className="py-2">Parcelas</th>
                       <th className="py-2">Total</th>
-                      <th className="py-2 text-right">Ação</th>
+                      <th className="py-2 text-right">Ações</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
@@ -854,26 +1170,126 @@ export default function App() {
                     ) : (
                       expenses.map((exp) => (
                         <tr key={exp.id}>
-                          <td className="py-3 font-medium">{exp.what}</td>
-                          <td className="py-3 text-slate-500">{exp.where}</td>
-                          <td className="py-3">{exp.paymentLabel}</td>
-                          <td className="py-3">
-                            {exp.installments}x de{" "}
-                            <span className="font-medium">
-                              {formatBRL(exp.installmentValue)}
-                            </span>
-                          </td>
-                          <td className="py-3 font-bold">
-                            {formatBRL(exp.totalAmount)}
-                          </td>
-                          <td className="py-3 text-right">
-                            <button
-                              onClick={() => handleRemoveExpense(exp.id)}
-                              className="text-slate-400 hover:text-red-500"
-                            >
-                              <Trash2 size={15} />
-                            </button>
-                          </td>
+                          {editingExpId === exp.id ? (
+                            <>
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="text"
+                                  value={editExpWhat}
+                                  onChange={(e) =>
+                                    setEditExpWhat(e.target.value)
+                                  }
+                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="text"
+                                  value={editExpWhere}
+                                  onChange={(e) =>
+                                    setEditExpWhere(e.target.value)
+                                  }
+                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <select
+                                  value={editExpPaymentSource}
+                                  onChange={(e) =>
+                                    setEditExpPaymentSource(e.target.value)
+                                  }
+                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                >
+                                  <option value="salary">
+                                    Salário / À Vista
+                                  </option>
+                                  {cards.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                      {c.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={editExpInstallments}
+                                  onChange={(e) =>
+                                    setEditExpInstallments(e.target.value)
+                                  }
+                                  className="w-16 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  value={editExpAmount}
+                                  onChange={(e) =>
+                                    setEditExpAmount(e.target.value)
+                                  }
+                                  className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                              </td>
+                              <td className="py-2 text-right space-x-2">
+                                <button
+                                  onClick={() => handleSaveExpenseEdit(exp.id)}
+                                  className="text-emerald-500 hover:text-emerald-400"
+                                  title="Salvar"
+                                >
+                                  <Check size={16} />
+                                </button>
+                                <button
+                                  onClick={() => setEditingExpId(null)}
+                                  className="text-slate-400 hover:text-slate-300"
+                                  title="Cancelar"
+                                >
+                                  <X size={16} />
+                                </button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="py-3 font-medium">{exp.what}</td>
+                              <td className="py-3 text-slate-500">
+                                {exp.where}
+                              </td>
+                              <td className="py-3">{exp.paymentLabel}</td>
+                              <td className="py-3">
+                                {Number(exp.installments) > 0 ? (
+                                  <>
+                                    {exp.installments}x de{" "}
+                                    <span className="font-medium">
+                                      {formatBRL(exp.installmentValue)}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span>À vista</span>
+                                )}
+                              </td>
+                              <td className="py-3 font-bold">
+                                {formatBRL(exp.totalAmount)}
+                              </td>
+                              <td className="py-3 text-right space-x-2">
+                                <button
+                                  onClick={() => startEditExpense(exp)}
+                                  className="text-slate-400 hover:text-amber-500"
+                                  title="Editar gasto"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  onClick={() => handleRemoveExpense(exp.id)}
+                                  className="text-slate-400 hover:text-red-500"
+                                  title="Excluir gasto"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </td>
+                            </>
+                          )}
                         </tr>
                       ))
                     )}
