@@ -40,7 +40,6 @@ import {
   Eye,
 } from "lucide-react";
 
-// Configuração do Firebase integrada diretamente no arquivo único
 const firebaseConfig = {
   apiKey: "AIzaSyCsQJYqDTk3jwd3ZD3IDvfWjprk-IoFXR4",
   authDomain: "pro-finance-control.firebaseapp.com",
@@ -59,24 +58,17 @@ const SUPERADMIN_EMAILS = ["dumaster@teste.com", "admin@financas.com"];
 const SESSION_DURATION_MS = 10 * 60 * 1000;
 const SESSION_STORAGE_KEY = "pfc_login_timestamp";
 
-// Função para mascarar e formatar em tempo real para o formato brasileiro (ex: 2.544,62)
 const maskCurrencyInput = (value) => {
   if (!value) return "";
-  // Remove tudo que não for dígito
   const digits = String(value).replace(/\D/g, "");
   if (!digits) return "";
-
-  // Converte para número dividindo por 100 para considerar os 2 últimos dígitos como centavos
   const numberVal = Number(digits) / 100;
-
-  // Formata com separador de milhar (.) e decimal (,)
   return numberVal.toLocaleString("pt-BR", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
 };
 
-// Converte a string formatada em número puro para salvar no banco
 const parseMaskedCurrency = (value) => {
   if (!value) return 0;
   const clean = String(value).replace(/\./g, "").replace(",", ".");
@@ -114,6 +106,8 @@ export default function App() {
   const [isEditingSalary, setIsEditingSalary] = useState(false);
   const [salaryInput, setSalaryInput] = useState("");
 
+  const [isEditingCards, setIsEditingCards] = useState(false);
+
   const [fixedName, setFixedName] = useState("");
   const [fixedAmount, setFixedAmount] = useState("");
   const [editingFixedId, setEditingFixedId] = useState(null);
@@ -122,22 +116,21 @@ export default function App() {
 
   const [cardName, setCardName] = useState("");
   const [cardLimit, setCardLimit] = useState("");
+  const [selectedCardIdForDetails, setSelectedCardIdForDetails] = useState("");
   const [editingCardId, setEditingCardId] = useState(null);
   const [editCardName, setEditCardName] = useState("");
   const [editCardLimit, setEditCardLimit] = useState("");
 
-  // Novos estados para o formulário de Gastos reformulado
   const [expWhat, setExpWhat] = useState("");
   const [expWhere, setExpWhere] = useState("");
   const [expAmount, setExpAmount] = useState("");
   const [expCategory, setExpCategory] = useState("Alimentação");
   const [newCategoryInput, setNewCategoryInput] = useState("");
   const [customCategories, setCustomCategories] = useState(["Alimentação", "Transporte", "Lazer", "Saúde", "Educação"]);
-  const [expPaymentMethod, setExpPaymentMethod] = useState("pix"); // 'pix', 'debito', 'credito'
+  const [expPaymentMethod, setExpPaymentMethod] = useState("pix");
   const [expCreditCardId, setExpCreditCardId] = useState("");
   const [expInstallments, setExpInstallments] = useState(1);
 
-  // Estados de edição de gastos
   const [editingExpId, setEditingExpId] = useState(null);
   const [editExpWhat, setEditExpWhat] = useState("");
   const [editExpWhere, setEditExpWhere] = useState("");
@@ -209,7 +202,11 @@ export default function App() {
       setSalary(loadedSalary);
       setSalaryInput(loadedSalary === 0 ? "" : (loadedSalary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
       setFixedExpenses(data.fixedExpenses || []);
-      setCards(data.cards || []);
+      const loadedCards = data.cards || [];
+      setCards(loadedCards);
+      if (loadedCards.length > 0 && !selectedCardIdForDetails) {
+        setSelectedCardIdForDetails(loadedCards[0].id);
+      }
       setExpenses(data.expenses || []);
     } else {
       const initialData = {
@@ -322,11 +319,12 @@ export default function App() {
     e.preventDefault();
     if (!cardName.trim() || cardLimit === "") return;
     const parsedLimit = parseMaskedCurrency(cardLimit);
-    const updated = [
-      ...cards,
-      { id: Date.now().toString(), name: cardName.trim(), limit: parsedLimit },
-    ];
+    const newCard = { id: Date.now().toString(), name: cardName.trim(), limit: parsedLimit };
+    const updated = [...cards, newCard];
     setCards(updated);
+    if (!selectedCardIdForDetails) {
+      setSelectedCardIdForDetails(newCard.id);
+    }
     setCardName("");
     setCardLimit("");
     await saveUserData({ cards: updated });
@@ -343,7 +341,7 @@ export default function App() {
     const newName = editCardName.trim();
     const parsedLimit = parseMaskedCurrency(editCardLimit);
     const updatedCards = cards.map((c) => (c.id === id ? { ...c, name: newName, limit: parsedLimit } : c));
-    const updatedExpenses = expenses.map((exp) => (exp.paymentSource === id ? { ...exp, paymentLabel: `${newName} (Crédito)` } : exp));
+    const updatedExpenses = expenses.map((exp) => (exp.paymentSource === id ? { ...exp, paymentLabel: `Cartão: ${newName}` } : exp));
     setCards(updatedCards);
     setExpenses(updatedExpenses);
     setEditingCardId(null);
@@ -353,10 +351,12 @@ export default function App() {
   const handleRemoveCard = async (id) => {
     const updated = cards.filter((c) => c.id !== id);
     setCards(updated);
+    if (selectedCardIdForDetails === id) {
+      setSelectedCardIdForDetails(updated.length > 0 ? updated[0].id : "");
+    }
     await saveUserData({ cards: updated });
   };
 
-  // Funções de Registro de Gasto com novas condições
   const handleAddExpense = async (e) => {
     e.preventDefault();
     if (!expWhat.trim() || !expWhere.trim() || expAmount === "") return;
@@ -498,6 +498,14 @@ export default function App() {
   const totalSpentMonth = totalFixed + totalMonthlyInstallments;
   const remainingSalary = salary - totalSpentMonth;
 
+  // Cálculos para o cartão selecionado
+  const selectedCardObj = cards.find((c) => c.id === selectedCardIdForDetails) || cards[0];
+  const selectedCardLimit = selectedCardObj ? Number(selectedCardObj.limit) || 0 : 0;
+  const selectedCardUsed = selectedCardObj
+    ? expenses.filter((e) => e.paymentSource === selectedCardObj.id).reduce((acc, e) => acc + (Number(e.totalAmount) || 0), 0)
+    : 0;
+  const selectedCardAvailable = selectedCardLimit - selectedCardUsed;
+
   if (loadingAuth) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 cursor-default select-none">
@@ -602,15 +610,15 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 cursor-default">
       <header className="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 select-none">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg font-bold cursor-default">Controle Financeiro</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 cursor-default">
+            <h1 className="text-lg font-bold cursor-default text-center sm:text-left">Controle Financeiro</h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 cursor-default text-center sm:text-left">
               Olá, {user.name} ({user.email})
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
             <div className="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg text-xs font-medium">
               <button
                 onClick={() => setViewMode("preview")}
@@ -658,12 +666,11 @@ export default function App() {
         </div>
       </header>
 
-      {/* ABA DE CÓDIGO */}
       {viewMode === "code" ? (
         <main className="max-w-7xl mx-auto p-4 select-none">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6">
             <h2 className="text-base font-bold mb-2 cursor-default">Código Atual (`src/App.jsx`)</h2>
-            <p className="text-xs text-slate-500 mb-4 cursor-default">O código fonte está integrado em arquivo único sem dependências externas de serviços.</p>
+            <p className="text-xs text-slate-500 mb-4 cursor-default">O código fonte está integrado em arquivo único.</p>
             <textarea
               readOnly
               value="// Aplicativo de controle financeiro configurado em React + Vite + Tailwind + Firebase (Single File)."
@@ -720,345 +727,272 @@ export default function App() {
           </div>
         </main>
       ) : (
-        <main className="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-6 select-none">
-          {/* COLUNA ESQUERDA */}
-          <div className="lg:col-span-4 space-y-6">
-            {/* SALÁRIO */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2 text-emerald-500 cursor-default">
-                  <Wallet size={20} />
-                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Painel de Salário</h2>
+        <main className="max-w-7xl mx-auto p-4 space-y-6 select-none">
+          {/* TOPO: 3 PAINÉIS LADO A LADO COM A MESMA ALTURA / TAMANHO (SALÁRIO, CARTÕES, TOTAL DE GASTOS) */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            {/* 1. PAINEL DE SALÁRIO */}
+            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 text-emerald-500 cursor-default">
+                    <Wallet size={18} />
+                    <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Painel de Salário</h2>
+                  </div>
+                  {!isEditingSalary && (
+                    <button
+                      onClick={() => {
+                        setSalaryInput(salary === 0 ? "" : (salary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+                        setIsEditingSalary(true);
+                      }}
+                      className="flex items-center gap-1 text-xs text-emerald-500 hover:underline cursor-pointer"
+                    >
+                      <Pencil size={12} /> Editar
+                    </button>
+                  )}
                 </div>
-                {!isEditingSalary && (
-                  <button
+
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 mb-3 cursor-default">
+                  <span className="block text-[11px] text-slate-500 dark:text-slate-400 mb-0.5 cursor-default">
+                    Saldo Livre Estimado
+                  </span>
+                  <span className={`text-2xl font-extrabold cursor-default ${remainingSalary >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
+                    {formatBRL(remainingSalary)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                {isEditingSalary ? (
+                  <form onSubmit={handleSaveSalary} className="space-y-1.5">
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={salaryInput}
+                        onChange={(e) => setSalaryInput(maskCurrencyInput(e.target.value))}
+                        placeholder="0,00"
+                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold"
+                      />
+                      <button type="submit" className="p-1.5 rounded-lg bg-emerald-600 text-white cursor-pointer" title="Salvar">
+                        <Check size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingSalary(false)}
+                        className="p-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-500 cursor-pointer"
+                        title="Cancelar"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div
                     onClick={() => {
                       setSalaryInput(salary === 0 ? "" : (salary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
                       setIsEditingSalary(true);
                     }}
-                    className="flex items-center gap-1 text-xs text-emerald-500 hover:underline cursor-pointer"
+                    className="cursor-pointer flex items-center justify-between text-xs"
                   >
-                    <Pencil size={14} /> Editar
-                  </button>
-                )}
-              </div>
-
-              {isEditingSalary ? (
-                <form onSubmit={handleSaveSalary} className="space-y-2">
-                  <label className="block text-xs text-slate-500 cursor-default">Digite seu salário (ex: digite 254462 para 2.544,62)</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      autoFocus
-                      value={salaryInput}
-                      onChange={(e) => setSalaryInput(maskCurrencyInput(e.target.value))}
-                      placeholder="0,00"
-                      className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-base font-semibold"
-                    />
-                    <button type="submit" className="p-2 rounded-lg bg-emerald-600 text-white cursor-pointer" title="Salvar">
-                      <Check size={18} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setIsEditingSalary(false)}
-                      className="p-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-500 cursor-pointer"
-                      title="Cancelar"
-                    >
-                      <X size={18} />
-                    </button>
+                    <span className="text-slate-500 cursor-pointer">Salário Informado:</span>
+                    <span className="font-bold text-slate-900 dark:text-white cursor-pointer">{formatBRL(salary)}</span>
                   </div>
-                </form>
-              ) : (
-                <div
-                  onClick={() => {
-                    setSalaryInput(salary === 0 ? "" : (salary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
-                    setIsEditingSalary(true);
-                  }}
-                  className="cursor-pointer p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-transparent hover:border-emerald-500/40 transition"
-                >
-                  <span className="block text-xs text-slate-500 mb-0.5 cursor-pointer">Salário Atual (clique para editar)</span>
-                  <span className="text-2xl font-bold text-slate-900 dark:text-white cursor-pointer">{formatBRL(salary)}</span>
-                </div>
-              )}
-
-              <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 flex justify-between text-sm cursor-default">
-                <span className="text-slate-500 cursor-default">Saldo livre estimado:</span>
-                <span className={remainingSalary >= 0 ? "text-emerald-500 font-bold cursor-default" : "text-red-500 font-bold cursor-default"}>
-                  {formatBRL(remainingSalary)}
-                </span>
-              </div>
-            </section>
-
-            {/* DESPESAS FIXAS */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2 text-blue-500 cursor-default">
-                  <Home size={20} />
-                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Despesas Fixas</h2>
-                </div>
-                <span className="text-sm font-semibold text-slate-500 cursor-default">{formatBRL(totalFixed)}</span>
-              </div>
-
-              <form onSubmit={handleAddFixed} className="flex gap-2 mb-4">
-                <input
-                  type="text"
-                  placeholder="Aluguel, Luz, Academia..."
-                  value={fixedName}
-                  onChange={(e) => setFixedName(e.target.value)}
-                  className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                />
-                <input
-                  type="text"
-                  placeholder="Valor"
-                  value={fixedAmount}
-                  onChange={(e) => setFixedAmount(maskCurrencyInput(e.target.value))}
-                  className="w-28 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                />
-                <button type="submit" className="p-2 rounded-lg bg-blue-600 text-white cursor-pointer" title="Adicionar">
-                  <Plus size={18} />
-                </button>
-              </form>
-
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {fixedExpenses.length === 0 ? (
-                  <p className="text-xs text-slate-500 text-center py-2 cursor-default">Nenhuma despesa fixa cadastrada.</p>
-                ) : (
-                  fixedExpenses.map((item) => (
-                    <div key={item.id} className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-sm">
-                      {editingFixedId === item.id ? (
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={editFixedName}
-                            onChange={(e) => setEditFixedName(e.target.value)}
-                            className="flex-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                          />
-                          <input
-                            type="text"
-                            value={editFixedAmount}
-                            onChange={(e) => setEditFixedAmount(maskCurrencyInput(e.target.value))}
-                            className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                          />
-                          <button onClick={() => handleSaveFixedEdit(item.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
-                            <Check size={16} />
-                          </button>
-                          <button onClick={() => setEditingFixedId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
-                            <X size={16} />
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-between">
-                          <span className="cursor-default">{item.name}</span>
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium cursor-default">
-                              {formatBRL(item.amount)}
-                            </span>
-                            <button
-                              onClick={() => startEditFixed(item)}
-                              className="text-slate-400 hover:text-blue-500 cursor-pointer"
-                              title="Editar despesa"
-                            >
-                              <Pencil size={14} />
-                            </button>
-                            <button
-                              onClick={() => handleRemoveFixed(item.id)}
-                              className="text-slate-400 hover:text-red-500 cursor-pointer"
-                              title="Excluir despesa"
-                            >
-                              <Trash2 size={15} />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))
                 )}
               </div>
             </section>
 
-            {/* TOTAL DE GASTOS */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-3 text-rose-500 cursor-default">
-                <TrendingDown size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Total de Gastos</h2>
-              </div>
-              <div className="space-y-2 text-sm cursor-default">
-                <div className="flex justify-between cursor-default">
-                  <span className="text-slate-500 cursor-default">Despesas Fixas:</span>
-                  <span className="font-medium cursor-default">{formatBRL(totalFixed)}</span>
+            {/* 2. PAINEL DE CARTÕES DE CRÉDITO COM SELECT INDIVIDUAL E HOVER */}
+            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 text-purple-500 cursor-default">
+                    <CreditCard size={18} />
+                    <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Cartões de Crédito</h2>
+                  </div>
+                  <button
+                    onClick={() => setIsEditingCards(!isEditingCards)}
+                    className="flex items-center gap-1 text-xs text-purple-400 hover:underline cursor-pointer"
+                  >
+                    <Pencil size={12} /> {isEditingCards ? "Ver Cartão" : "Editar"}
+                  </button>
                 </div>
-                <div className="flex justify-between cursor-default">
-                  <span className="text-slate-500 cursor-default">Parcelas / Gastos do Mês:</span>
-                  <span className="font-medium cursor-default">{formatBRL(totalMonthlyInstallments)}</span>
-                </div>
-                <div className="flex justify-between cursor-default">
-                  <span className="text-slate-500 cursor-default">Total Acumulado de Compras:</span>
-                  <span className="font-medium cursor-default">{formatBRL(totalExpenses)}</span>
-                </div>
-                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between text-base font-bold cursor-default">
-                  <span className="cursor-default">Total Mensal Comprometido:</span>
-                  <span className="text-rose-500 cursor-default">{formatBRL(totalSpentMonth)}</span>
-                </div>
-              </div>
-            </section>
-          </div>
 
-          {/* COLUNA DIREITA */}
-          <div className="lg:col-span-8 space-y-6">
-            {/* CARTÕES DE CRÉDITO */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-4 text-purple-500 cursor-default">
-                <CreditCard size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Cartões de Crédito e Limites</h2>
-              </div>
+                {isEditingCards ? (
+                  <div className="space-y-3 mb-2">
+                    <form onSubmit={handleAddCard} className="space-y-2">
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder="Nome (ex: Nubank)"
+                          value={cardName}
+                          onChange={(e) => setCardName(e.target.value)}
+                          className="flex-1 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Limite R$"
+                          value={cardLimit}
+                          onChange={(e) => setCardLimit(maskCurrencyInput(e.target.value))}
+                          className="w-20 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
+                        />
+                        <button type="submit" className="p-1.5 rounded-lg bg-purple-600 text-white cursor-pointer" title="Adicionar">
+                          <Plus size={16} />
+                        </button>
+                      </div>
+                    </form>
 
-              <form onSubmit={handleAddCard} className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-                <input
-                  type="text"
-                  placeholder="Nome do Cartão (ex: Nubank)"
-                  value={cardName}
-                  onChange={(e) => setCardName(e.target.value)}
-                  className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                />
-                <input
-                  type="text"
-                  placeholder="Limite Total"
-                  value={cardLimit}
-                  onChange={(e) => setCardLimit(maskCurrencyInput(e.target.value))}
-                  className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                />
-                <button
-                  type="submit"
-                  className="py-2 px-4 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Plus size={16} /> Adicionar Cartão
-                </button>
-              </form>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {cards.length === 0 ? (
-                  <p className="text-xs text-slate-500 col-span-2 py-2 cursor-default">Nenhum cartão cadastrado.</p>
-                ) : (
-                  cards.map((card) => {
-                    const used = expenses
-                      .filter((e) => e.paymentSource === card.id)
-                      .reduce((acc, e) => acc + (Number(e.totalAmount) || 0), 0);
-                    const available = (Number(card.limit) || 0) - used;
-
-                    return (
-                      <div key={card.id} className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                        {editingCardId === card.id ? (
-                          <div className="space-y-2">
-                            <div>
-                              <label className="block text-[11px] text-slate-400 cursor-default">Nome do Cartão</label>
+                    <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                      {cards.map((c) => (
+                        <div key={c.id} className="flex items-center justify-between p-2 rounded bg-slate-50 dark:bg-slate-800/60 text-xs">
+                          {editingCardId === c.id ? (
+                            <div className="flex items-center gap-1 w-full">
                               <input
                                 type="text"
                                 value={editCardName}
                                 onChange={(e) => setEditCardName(e.target.value)}
-                                className="w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                                className="flex-1 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
                               />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-slate-400 cursor-default">Limite Total (R$)</label>
                               <input
                                 type="text"
                                 value={editCardLimit}
                                 onChange={(e) => setEditCardLimit(maskCurrencyInput(e.target.value))}
-                                className="w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                                className="w-16 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
                               />
-                            </div>
-                            <div className="flex justify-end gap-2 pt-1">
-                              <button
-                                onClick={() => handleSaveCardEdit(card.id)}
-                                className="px-3 py-1 rounded bg-emerald-600 text-white text-xs flex items-center gap-1 cursor-pointer"
-                              >
-                                <Check size={14} /> Salvar
+                              <button onClick={() => handleSaveCardEdit(c.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
+                                <Check size={14} />
                               </button>
-                              <button
-                                onClick={() => setEditingCardId(null)}
-                                className="px-3 py-1 rounded bg-slate-200 dark:bg-slate-700 text-xs flex items-center gap-1 cursor-pointer"
-                              >
-                                <X size={14} /> Cancelar
+                              <button onClick={() => setEditingCardId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
+                                <X size={14} />
                               </button>
                             </div>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex justify-between items-center mb-2">
-                              <span className="font-bold cursor-default">{card.name}</span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={() => startEditCard(card)}
-                                  className="text-slate-400 hover:text-purple-500 cursor-pointer"
-                                  title="Editar cartão"
-                                >
-                                  <Pencil size={14} />
+                          ) : (
+                            <>
+                              <span className="font-medium">{c.name} ({formatBRL(c.limit)})</span>
+                              <div className="flex items-center gap-1.5">
+                                <button onClick={() => startEditCard(c)} className="text-slate-400 hover:text-purple-500 cursor-pointer" title="Editar">
+                                  <Pencil size={12} />
                                 </button>
-                                <button
-                                  onClick={() => handleRemoveCard(card.id)}
-                                  className="text-slate-400 hover:text-red-500 cursor-pointer"
-                                  title="Excluir cartão"
-                                >
-                                  <Trash2 size={15} />
+                                <button onClick={() => handleRemoveCard(c.id)} className="text-slate-400 hover:text-red-500 cursor-pointer" title="Excluir">
+                                  <Trash2 size={12} />
                                 </button>
                               </div>
-                            </div>
-                            <div className="text-xs space-y-1 text-slate-500 dark:text-slate-400 cursor-default">
-                              <div className="flex justify-between cursor-default">
-                                <span className="cursor-default">Limite Total:</span>
-                                <span className="font-medium text-slate-900 dark:text-white cursor-default">{formatBRL(card.limit)}</span>
-                              </div>
-                              <div className="flex justify-between cursor-default">
-                                <span className="cursor-default">Utilizado:</span>
-                                <span className="font-medium text-rose-500 cursor-default">{formatBRL(used)}</span>
-                              </div>
-                              <div className="flex justify-between cursor-default">
-                                <span className="cursor-default">Disponível:</span>
-                                <span className="font-medium text-emerald-500 cursor-default">{formatBRL(available)}</span>
-                              </div>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })
+                            </>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : cards.length === 0 ? (
+                  <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 mb-3 text-xs text-slate-400 cursor-default">
+                    Nenhum cartão cadastrado. Clique em <strong>Editar</strong> acima para adicionar.
+                  </div>
+                ) : (
+                  <div className="space-y-2 mb-3">
+                    <select
+                      value={selectedCardIdForDetails}
+                      onChange={(e) => setSelectedCardIdForDetails(e.target.value)}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-700/80 hover:border-purple-500/50"
+                    >
+                      {cards.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+
+                    <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 cursor-default">
+                      <span className="block text-[11px] text-slate-500 dark:text-slate-400 cursor-default">
+                        Limite Disponível ({selectedCardObj?.name || "Cartão"})
+                      </span>
+                      <span className="text-2xl font-extrabold text-purple-400 cursor-default">
+                        {formatBRL(selectedCardAvailable)}
+                      </span>
+                    </div>
+                  </div>
                 )}
+              </div>
+
+              {!isEditingCards && selectedCardObj && (
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 text-xs flex justify-between text-slate-500">
+                  <span>Limite Cartão: <strong className="text-slate-900 dark:text-white">{formatBRL(selectedCardLimit)}</strong></span>
+                  <span>Em Uso: <strong className="text-rose-500">{formatBRL(selectedCardUsed)}</strong></span>
+                </div>
+              )}
+            </section>
+
+            {/* 3. PAINEL DE TOTAL DE GASTOS */}
+            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-3 text-rose-500 cursor-default">
+                  <TrendingDown size={18} />
+                  <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Total de Gastos</h2>
+                </div>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Despesas Fixas:</span>
+                    <span className="font-medium">{formatBRL(totalFixed)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Parcelas do Mês:</span>
+                    <span className="font-medium">{formatBRL(totalMonthlyInstallments)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Total Acumulado:</span>
+                    <span className="font-medium">{formatBRL(totalExpenses)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-sm font-bold">
+                <span>Comprometido:</span>
+                <span className="text-rose-500 text-base">{formatBRL(totalSpentMonth)}</span>
               </div>
             </section>
 
-            {/* REGISTRAR NOVO GASTO REFORMULADO */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-4 text-emerald-500 cursor-default">
-                <ShoppingBag size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Registrar Novo Gasto</h2>
-              </div>
+          </div>
 
-              <form onSubmit={handleAddExpense} className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <input
-                    type="text"
-                    placeholder="O que foi gasto?"
-                    value={expWhat}
-                    onChange={(e) => setExpWhat(e.target.value)}
-                    className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Onde foi gasto?"
-                    value={expWhere}
-                    onChange={(e) => setExpWhere(e.target.value)}
-                    className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Valor Total"
-                    value={expAmount}
-                    onChange={(e) => setExpAmount(maskCurrencyInput(e.target.value))}
-                    className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                  />
+          {/* SEGUNDA LINHA: REGISTRO DE GASTO (LATERAL ESQUERDA) + HISTÓRICO DE GASTOS (DIREITA) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+            
+            {/* 1. REGISTRAR NOVO GASTO (LOGO ABAIXO DO SALÁRIO) */}
+            <div className="lg:col-span-5 flex flex-col">
+              <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col justify-between h-full">
+                <div className="flex items-center gap-2 mb-4 text-emerald-500 cursor-default">
+                  <ShoppingBag size={20} />
+                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Registrar Novo Gasto</h2>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <form onSubmit={handleAddExpense} className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">O que foi gasto?</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Supermercado, Jantar..."
+                      value={expWhat}
+                      onChange={(e) => setExpWhat(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Onde foi gasto?</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Carrefour, Restaurante..."
+                      value={expWhere}
+                      onChange={(e) => setExpWhere(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Valor Total (R$)</label>
+                    <input
+                      type="text"
+                      placeholder="0,00"
+                      value={expAmount}
+                      onChange={(e) => setExpAmount(maskCurrencyInput(e.target.value))}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold"
+                    />
+                  </div>
+
                   <div>
                     <label className="block text-xs text-slate-500 mb-1 cursor-default">Categoria</label>
                     <select
@@ -1073,223 +1007,327 @@ export default function App() {
                     </select>
                   </div>
 
+                  {expCategory === "nova" && (
+                    <div>
+                      <input
+                        type="text"
+                        placeholder="Nome da nova categoria"
+                        value={newCategoryInput}
+                        onChange={(e) => setNewCategoryInput(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                      />
+                    </div>
+                  )}
+
                   <div>
                     <label className="block text-xs text-slate-500 mb-1 cursor-default">Forma de Pagamento</label>
-                    <select
-                      value={expPaymentMethod}
-                      onChange={(e) => setExpPaymentMethod(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                    >
-                      <option value="pix">Pix</option>
-                      <option value="debito">Cartão de Débito</option>
-                      <option value="credito">Cartão de Crédito</option>
-                    </select>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setExpPaymentMethod("pix"); setExpCreditCardId(""); setExpInstallments(1); }}
+                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "pix" ? "bg-emerald-500 text-white border-emerald-500 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
+                      >
+                        Pix
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setExpPaymentMethod("debito"); setExpCreditCardId(""); setExpInstallments(1); }}
+                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "debito" ? "bg-blue-500 text-white border-blue-500 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
+                      >
+                        Débito
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExpPaymentMethod("credito")}
+                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "credito" ? "bg-purple-600 text-white border-purple-600 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
+                      >
+                        Crédito
+                      </button>
+                    </div>
                   </div>
+
+                  {expPaymentMethod === "credito" && (
+                    <div className="p-3 rounded-xl bg-purple-500/5 border border-purple-500/20 space-y-2.5">
+                      <div>
+                        <label className="block text-xs text-slate-500 mb-1 cursor-default">Selecione o Cartão</label>
+                        <select
+                          value={expCreditCardId}
+                          onChange={(e) => setExpCreditCardId(e.target.value)}
+                          required
+                          className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
+                        >
+                          <option value="">-- Escolha o Cartão --</option>
+                          {cards.map((c) => (
+                            <option key={c.id} value={c.id}>{c.name} (Lim: {formatBRL(c.limit)})</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500 mb-1 cursor-default">Parcelas</label>
+                        <select
+                          value={expInstallments}
+                          onChange={(e) => setExpInstallments(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
+                        >
+                          {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+                            <option key={n} value={n}>{n}x {n > 1 ? `de ${formatBRL(parseMaskedCurrency(expAmount) / n)}` : "(À vista)"}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium flex items-center justify-center gap-1.5 cursor-pointer transition mt-2"
+                  >
+                    <Plus size={16} /> Lançar Gasto
+                  </button>
+                </form>
+              </section>
+            </div>
+
+            {/* 2. HISTÓRICO DE GASTOS, TOTAL E PARCELAS */}
+            <div className="lg:col-span-7 flex flex-col">
+              <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col h-full min-h-[420px]">
+                <div className="flex items-center gap-2 mb-4 text-amber-500 cursor-default">
+                  <Layers size={20} />
+                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Histórico de Gastos, Total e Parcelas</h2>
                 </div>
 
-                {expCategory === "nova" && (
-                  <div>
-                    <input
-                      type="text"
-                      placeholder="Nome da nova categoria"
-                      value={newCategoryInput}
-                      onChange={(e) => setNewCategoryInput(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                    />
-                  </div>
-                )}
-
-                {/* Condicional para Cartão de Crédito (Parcelas) */}
-                {expPaymentMethod === "credito" && (
-                  <div className="p-3 rounded-lg bg-purple-500/5 border border-purple-500/20 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs text-slate-500 mb-1 cursor-default">Selecione o Cartão</label>
-                      <select
-                        value={expCreditCardId}
-                        onChange={(e) => setExpCreditCardId(e.target.value)}
-                        required
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                      >
-                        <option value="">-- Escolha o Cartão --</option>
-                        {cards.map((c) => (
-                          <option key={c.id} value={c.id}>{c.name} (Limite: {formatBRL(c.limit)})</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-500 mb-1 cursor-default">Parcelas</label>
-                      <select
-                        value={expInstallments}
-                        onChange={(e) => setExpInstallments(Number(e.target.value))}
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                      >
-                        {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>{n}x {n > 1 ? `de ${formatBRL(parseMaskedCurrency(expAmount) / n)}` : "(À vista)"}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium flex items-center justify-center gap-1.5 cursor-pointer transition"
-                >
-                  <Plus size={16} /> Lançar Gasto
-                </button>
-              </form>
-            </section>
-
-            {/* HISTÓRICO DE GASTOS */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-4 text-amber-500 cursor-default">
-                <Layers size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Histórico de Gastos, Total e Parcelas</h2>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
-                      <th className="py-2 cursor-default">O que foi gasto</th>
-                      <th className="py-2 cursor-default">Onde</th>
-                      <th className="py-2 cursor-default">Categoria</th>
-                      <th className="py-2 cursor-default">Pagamento</th>
-                      <th className="py-2 cursor-default">Parcelas</th>
-                      <th className="py-2 cursor-default">Total</th>
-                      <th className="py-2 text-right cursor-default">Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                    {expenses.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="py-4 text-center text-xs text-slate-500 cursor-default">
-                          Nenhum gasto registrado até o momento.
-                        </td>
+                <div className="overflow-x-auto overflow-y-auto flex-1 max-h-[380px]">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 text-xs">
+                        <th className="py-2 cursor-default">O que foi gasto</th>
+                        <th className="py-2 cursor-default">Onde</th>
+                        <th className="py-2 cursor-default">Categoria</th>
+                        <th className="py-2 cursor-default">Pagamento</th>
+                        <th className="py-2 cursor-default">Parcelas</th>
+                        <th className="py-2 cursor-default">Total</th>
+                        <th className="py-2 text-right cursor-default">Ações</th>
                       </tr>
-                    ) : (
-                      expenses.map((exp) => (
-                        <tr key={exp.id}>
-                          {editingExpId === exp.id ? (
-                            <>
-                              <td className="py-2 pr-2">
-                                <input
-                                  type="text"
-                                  value={editExpWhat}
-                                  onChange={(e) => setEditExpWhat(e.target.value)}
-                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                />
-                              </td>
-                              <td className="py-2 pr-2">
-                                <input
-                                  type="text"
-                                  value={editExpWhere}
-                                  onChange={(e) => setEditExpWhere(e.target.value)}
-                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                />
-                              </td>
-                              <td className="py-2 pr-2">
-                                <select
-                                  value={editExpCategory}
-                                  onChange={(e) => setEditExpCategory(e.target.value)}
-                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
-                                >
-                                  {customCategories.map((cat) => (
-                                    <option key={cat} value={cat}>{cat}</option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td className="py-2 pr-2">
-                                <select
-                                  value={editExpPaymentMethod}
-                                  onChange={(e) => setEditExpPaymentMethod(e.target.value)}
-                                  className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
-                                >
-                                  <option value="pix">Pix</option>
-                                  <option value="debito">Débito</option>
-                                  <option value="credito">Crédito</option>
-                                </select>
-                              </td>
-                              <td className="py-2 pr-2">
-                                {editExpPaymentMethod === "credito" ? (
-                                  <input
-                                    type="number"
-                                    min="1"
-                                    max="24"
-                                    value={editExpInstallments}
-                                    onChange={(e) => setEditExpInstallments(Number(e.target.value))}
-                                    className="w-16 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                  />
-                                ) : (
-                                  <span className="text-xs text-slate-400">1x</span>
-                                )}
-                              </td>
-                              <td className="py-2 pr-2">
-                                <input
-                                  type="text"
-                                  value={editExpAmount}
-                                  onChange={(e) => setEditExpAmount(maskCurrencyInput(e.target.value))}
-                                  className="w-24 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                />
-                              </td>
-                              <td className="py-2 text-right space-x-2">
-                                <button onClick={() => handleSaveExpenseEdit(exp.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
-                                  <Check size={16} />
-                                </button>
-                                <button onClick={() => setEditingExpId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
-                                  <X size={16} />
-                                </button>
-                              </td>
-                            </>
-                          ) : (
-                            <>
-                              <td className="py-3 font-medium cursor-default">{exp.what}</td>
-                              <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
-                              <td className="py-3 cursor-default">
-                                <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
-                                  {exp.category || "Geral"}
-                                </span>
-                              </td>
-                              <td className="py-3 cursor-default">{exp.paymentLabel}</td>
-                              <td className="py-3 cursor-default">
-                                {Number(exp.installments) > 1 ? (
-                                  <>
-                                    {exp.installments}x de{" "}
-                                    <span className="font-medium cursor-default">
-                                      {formatBRL(exp.installmentValue)}
-                                    </span>
-                                  </>
-                                ) : (
-                                  <span className="cursor-default">À vista</span>
-                                )}
-                              </td>
-                              <td className="py-3 font-bold cursor-default">{formatBRL(exp.totalAmount)}</td>
-                              <td className="py-3 text-right space-x-2">
-                                <button
-                                  onClick={() => startEditExpense(exp)}
-                                  className="text-slate-400 hover:text-amber-500 cursor-pointer"
-                                  title="Editar gasto"
-                                >
-                                  <Pencil size={14} />
-                                </button>
-                                <button
-                                  onClick={() => handleRemoveExpense(exp.id)}
-                                  className="text-slate-400 hover:text-red-500 cursor-pointer"
-                                  title="Excluir gasto"
-                                >
-                                  <Trash2 size={15} />
-                                </button>
-                              </td>
-                            </>
-                          )}
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
+                      {expenses.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-6 text-center text-xs text-slate-500 cursor-default">
+                            Nenhum gasto registrado até o momento.
+                          </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                      ) : (
+                        expenses.map((exp) => (
+                          <tr key={exp.id}>
+                            {editingExpId === exp.id ? (
+                              <>
+                                <td className="py-2 pr-1">
+                                  <input
+                                    type="text"
+                                    value={editExpWhat}
+                                    onChange={(e) => setEditExpWhat(e.target.value)}
+                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                  />
+                                </td>
+                                <td className="py-2 pr-1">
+                                  <input
+                                    type="text"
+                                    value={editExpWhere}
+                                    onChange={(e) => setEditExpWhere(e.target.value)}
+                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                  />
+                                </td>
+                                <td className="py-2 pr-1">
+                                  <select
+                                    value={editExpCategory}
+                                    onChange={(e) => setEditExpCategory(e.target.value)}
+                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
+                                  >
+                                    {customCategories.map((cat) => (
+                                      <option key={cat} value={cat}>{cat}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td className="py-2 pr-1">
+                                  <select
+                                    value={editExpPaymentMethod}
+                                    onChange={(e) => setEditExpPaymentMethod(e.target.value)}
+                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
+                                  >
+                                    <option value="pix">Pix</option>
+                                    <option value="debito">Débito</option>
+                                    <option value="credito">Crédito</option>
+                                  </select>
+                                </td>
+                                <td className="py-2 pr-1">
+                                  {editExpPaymentMethod === "credito" ? (
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="24"
+                                      value={editExpInstallments}
+                                      onChange={(e) => setEditExpInstallments(Number(e.target.value))}
+                                      className="w-12 px-1 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                    />
+                                  ) : (
+                                    <span className="text-xs text-slate-400">1x</span>
+                                  )}
+                                </td>
+                                <td className="py-2 pr-1">
+                                  <input
+                                    type="text"
+                                    value={editExpAmount}
+                                    onChange={(e) => setEditExpAmount(maskCurrencyInput(e.target.value))}
+                                    className="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                  />
+                                </td>
+                                <td className="py-2 text-right space-x-1">
+                                  <button onClick={() => handleSaveExpenseEdit(exp.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
+                                    <Check size={14} />
+                                  </button>
+                                  <button onClick={() => setEditingExpId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
+                                    <X size={14} />
+                                  </button>
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="py-3 font-medium cursor-default">{exp.what}</td>
+                                <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
+                                <td className="py-3 cursor-default">
+                                  <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
+                                    {exp.category || "Geral"}
+                                  </span>
+                                </td>
+                                <td className="py-3 cursor-default">{exp.paymentLabel}</td>
+                                <td className="py-3 cursor-default">
+                                  {Number(exp.installments) > 1 ? (
+                                    <>
+                                      {exp.installments}x de{" "}
+                                      <span className="font-medium cursor-default">
+                                        {formatBRL(exp.installmentValue)}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <span className="cursor-default">À vista</span>
+                                  )}
+                                </td>
+                                <td className="py-3 font-bold cursor-default">{formatBRL(exp.totalAmount)}</td>
+                                <td className="py-3 text-right space-x-2">
+                                  <button
+                                    onClick={() => startEditExpense(exp)}
+                                    className="text-slate-400 hover:text-amber-500 cursor-pointer"
+                                    title="Editar gasto"
+                                  >
+                                    <Pencil size={14} />
+                                  </button>
+                                  <button
+                                    onClick={() => handleRemoveExpense(exp.id)}
+                                    className="text-slate-400 hover:text-red-500 cursor-pointer"
+                                    title="Excluir gasto"
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+
           </div>
+
+          {/* PARTE INFERIOR: DESPESAS FIXAS */}
+          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-blue-500 cursor-default">
+                <Home size={20} />
+                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Despesas Fixas</h2>
+              </div>
+              <span className="text-sm font-semibold text-slate-500 cursor-default">{formatBRL(totalFixed)}</span>
+            </div>
+
+            <form onSubmit={handleAddFixed} className="flex gap-2 mb-4">
+              <input
+                type="text"
+                placeholder="Aluguel, Luz, Academia..."
+                value={fixedName}
+                onChange={(e) => setFixedName(e.target.value)}
+                className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+              />
+              <input
+                type="text"
+                placeholder="Valor (R$)"
+                value={fixedAmount}
+                onChange={(e) => setFixedAmount(maskCurrencyInput(e.target.value))}
+                className="w-32 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+              />
+              <button type="submit" className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium cursor-pointer flex items-center gap-1">
+                <Plus size={16} /> Adicionar
+              </button>
+            </form>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {fixedExpenses.length === 0 ? (
+                <p className="text-xs text-slate-500 col-span-full py-2 cursor-default">Nenhuma despesa fixa cadastrada.</p>
+              ) : (
+                fixedExpenses.map((item) => (
+                  <div key={item.id} className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-sm">
+                    {editingFixedId === item.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={editFixedName}
+                          onChange={(e) => setEditFixedName(e.target.value)}
+                          className="flex-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                        />
+                        <input
+                          type="text"
+                          value={editFixedAmount}
+                          onChange={(e) => setEditFixedAmount(maskCurrencyInput(e.target.value))}
+                          className="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                        />
+                        <button onClick={() => handleSaveFixedEdit(item.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
+                          <Check size={16} />
+                        </button>
+                        <button onClick={() => setEditingFixedId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
+                          <X size={16} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <span className="cursor-default font-medium">{item.name}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-900 dark:text-white cursor-default">
+                            {formatBRL(item.amount)}
+                          </span>
+                          <button
+                            onClick={() => startEditFixed(item)}
+                            className="text-slate-400 hover:text-blue-500 cursor-pointer"
+                            title="Editar despesa"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            onClick={() => handleRemoveFixed(item.id)}
+                            className="text-slate-400 hover:text-red-500 cursor-pointer"
+                            title="Excluir despesa"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
         </main>
       )}
     </div>
