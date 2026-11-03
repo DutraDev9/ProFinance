@@ -42,6 +42,7 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   RotateCcw,
   KeyRound,
   CheckCircle2,
@@ -90,6 +91,15 @@ const formatBRL = (value) => {
   });
 };
 
+const numberToMaskedCurrency = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num === 0) return "";
+  return num.toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
 const toSafeInt = (val, fallback = 0) => {
   const n = parseInt(val, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -109,6 +119,66 @@ const sanitizeCycle = (val) => {
     if (Number.isFinite(n) && Math.abs(n) < 500) return n;
   }
   return 0;
+};
+
+// Agrupa compras no cartão de crédito feitas no mesmo lugar, mesmo cartão, mesmas parcelas e mesmo ciclo em uma única compra
+const consolidateCardExpenses = (list) => {
+  const chronological = [...(list || [])].reverse();
+  const grouped = [];
+
+  for (const exp of chronological) {
+    const isCredit =
+      exp.paymentMethod === "credito" ||
+      String(exp.paymentLabel || "").startsWith("Cartão:");
+
+    if (isCredit) {
+      const normWhere = String(exp.where || "").trim().toLowerCase();
+      const normSource = String(exp.paymentSource || "");
+      const normInst = Math.max(1, toSafeInt(exp.installments, 1));
+      const normCycle = sanitizeCycle(exp.startCycle);
+
+      const existingIndex = grouped.findIndex((item) => {
+        const itemIsCredit =
+          item.paymentMethod === "credito" ||
+          String(item.paymentLabel || "").startsWith("Cartão:");
+        return (
+          itemIsCredit &&
+          String(item.where || "").trim().toLowerCase() === normWhere &&
+          String(item.paymentSource || "") === normSource &&
+          Math.max(1, toSafeInt(item.installments, 1)) === normInst &&
+          sanitizeCycle(item.startCycle) === normCycle
+        );
+      });
+
+      if (existingIndex !== -1) {
+        const existing = grouped[existingIndex];
+        const existingItems = String(existing.what || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const newItems = String(exp.what || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        for (const ni of newItems) {
+          if (!existingItems.some((ei) => ei.toLowerCase() === ni.toLowerCase())) {
+            existingItems.push(ni);
+          }
+        }
+
+        grouped[existingIndex] = {
+          ...existing,
+          what: existingItems.join(", "),
+        };
+        continue;
+      }
+    }
+
+    grouped.push(exp);
+  }
+
+  return grouped.reverse();
 };
 
 export default function App() {
@@ -159,9 +229,13 @@ export default function App() {
   const [expWhat, setExpWhat] = useState("");
   const [expWhere, setExpWhere] = useState("");
   const [expAmount, setExpAmount] = useState("");
+  const [isMultiplePurchase, setIsMultiplePurchase] = useState(false);
+  const [extraPurchaseItems, setExtraPurchaseItems] = useState([]);
+  const [extraItemInput, setExtraItemInput] = useState("");
   const [expCategory, setExpCategory] = useState("Alimentação");
+  const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryInput, setNewCategoryInput] = useState("");
-  const [customCategories, setCustomCategories] = useState(["Alimentação", "Transporte", "Lazer", "Saúde", "Educação"]);
+  const [customCategories, setCustomCategories] = useState(["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"]);
   const [expPaymentMethod, setExpPaymentMethod] = useState("pix");
   const [expCreditCardId, setExpCreditCardId] = useState("");
   const [expInstallments, setExpInstallments] = useState(1);
@@ -248,8 +322,11 @@ export default function App() {
         role: isSuperAdmin ? "superadmin" : data.role || "user",
       });
       setSalary(loadedSalary);
-      setSalaryInput(loadedSalary === 0 ? "" : (loadedSalary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+      setSalaryInput(numberToMaskedCurrency(loadedSalary));
       setFixedExpenses(data.fixedExpenses || []);
+      if (Array.isArray(data.customCategories) && data.customCategories.length > 0) {
+        setCustomCategories(data.customCategories);
+      }
       const loadedCards = data.cards || [];
       setCards(loadedCards);
       if (loadedCards.length > 0 && !selectedCardIdForDetails) {
@@ -273,7 +350,7 @@ export default function App() {
       setExpenses(cleanedExpenses);
       setCurrentCycle(validCycle);
       if (data.currentCycle !== validCycle) {
-        await setDoc(userRef, { currentCycle: validCycle, expenses: cleanedExpenses }, { merge: true });
+        await setDoc(userRef, { currentCycle: validCycle }, { merge: true });
       }
     } else {
       const initialData = {
@@ -282,6 +359,7 @@ export default function App() {
         role: isSuperAdmin ? "superadmin" : "user",
         salary: 0,
         fixedExpenses: [],
+        customCategories: ["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"],
         cards: [],
         expenses: [],
         currentCycle: 0,
@@ -292,6 +370,7 @@ export default function App() {
       setSalary(0);
       setSalaryInput("");
       setFixedExpenses([]);
+      setCustomCategories(initialData.customCategories);
       setCards([]);
       setExpenses([]);
       setCurrentCycle(0);
@@ -454,7 +533,7 @@ export default function App() {
   const startEditFixed = (item) => {
     setEditingFixedId(item.id);
     setEditFixedName(item.name);
-    setEditFixedAmount((item.amount * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+    setEditFixedAmount(numberToMaskedCurrency(item.amount));
   };
 
   const handleSaveFixedEdit = async (id) => {
@@ -492,7 +571,7 @@ export default function App() {
   const startEditCard = (card) => {
     setEditingCardId(card.id);
     setEditCardName(card.name);
-    setEditCardLimit((card.limit * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+    setEditCardLimit(numberToMaskedCurrency(card.limit));
   };
 
   const handleSaveCardEdit = async (id) => {
@@ -516,19 +595,113 @@ export default function App() {
     await saveUserData({ cards: updated });
   };
 
+  const handleCreateCategory = async (e) => {
+    if (e) e.preventDefault();
+    const trimmed = newCategoryInput.trim();
+    if (!trimmed) return;
+    const exists = customCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase());
+    const updatedCategories = exists ? customCategories : [...customCategories, trimmed];
+    setCustomCategories(updatedCategories);
+    setExpCategory(trimmed);
+    setNewCategoryInput("");
+    setIsAddingCategory(false);
+    await saveUserData({ customCategories: updatedCategories });
+  };
+
+  const handleAddExtraItem = () => {
+    const trimmed = extraItemInput.trim();
+    if (!trimmed) return;
+    if (!extraPurchaseItems.some((i) => i.toLowerCase() === trimmed.toLowerCase())) {
+      setExtraPurchaseItems([...extraPurchaseItems, trimmed]);
+    }
+    setExtraItemInput("");
+  };
+
+  const handleRemoveExtraItem = (idx) => {
+    setExtraPurchaseItems(extraPurchaseItems.filter((_, i) => i !== idx));
+  };
+
   const handleAddExpense = async (e) => {
     e.preventDefault();
-    if (!expWhat.trim() || !expWhere.trim() || expAmount === "") return;
+    if (!expWhat.trim() || !expWhere.trim()) return;
 
-    let finalCategory = expCategory;
-    let updatedCategories = customCategories;
-    if (expCategory === "nova" && newCategoryInput.trim()) {
-      finalCategory = newCategoryInput.trim();
-      if (!customCategories.includes(finalCategory)) {
-        updatedCategories = [...customCategories, finalCategory];
-        setCustomCategories(updatedCategories);
+    const finalCategory = expCategory || "Alimentação";
+    const cycleNow = sanitizeCycle(currentCycle);
+
+    const allItemsList = [
+      expWhat.trim(),
+      ...(isMultiplePurchase ? extraPurchaseItems : []),
+      ...(isMultiplePurchase && extraItemInput.trim() ? [extraItemInput.trim()] : []),
+    ].filter(Boolean);
+    const combinedWhat = allItemsList.join(", ");
+
+    if (isMultiplePurchase && expPaymentMethod === "credito") {
+      const paymentSource = expCreditCardId || "credito";
+      const installments = Math.max(1, Number(expInstallments) || 1);
+      const normWhere = expWhere.trim().toLowerCase();
+
+      const existingMatch = expenses.find((item) => {
+        const itemIsCredit =
+          item.paymentMethod === "credito" ||
+          String(item.paymentLabel || "").startsWith("Cartão:");
+        return (
+          itemIsCredit &&
+          String(item.where || "").trim().toLowerCase() === normWhere &&
+          String(item.paymentSource || "") === String(paymentSource) &&
+          Math.max(1, toSafeInt(item.installments, 1)) === installments &&
+          sanitizeCycle(item.startCycle) === cycleNow
+        );
+      });
+
+      if (existingMatch) {
+        const existingItems = String(existingMatch.what || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const newItems = combinedWhat
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        for (const ni of newItems) {
+          if (!existingItems.some((ei) => ei.toLowerCase() === ni.toLowerCase())) {
+            existingItems.push(ni);
+          }
+        }
+
+        const typedTotal = parseMaskedCurrency(expAmount);
+        const finalTotal =
+          existingMatch.totalAmount > 0 ? existingMatch.totalAmount : typedTotal;
+        const finalInstValue =
+          installments > 1 ? finalTotal / installments : finalTotal;
+
+        const updated = expenses.map((item) =>
+          item.id === existingMatch.id
+            ? {
+                ...item,
+                what: existingItems.join(", "),
+                totalAmount: finalTotal,
+                installmentValue: finalInstValue,
+              }
+            : item
+        );
+
+        setExpenses(updated);
+        setExpWhat("");
+        setExpWhere("");
+        setExpAmount("");
+        setIsMultiplePurchase(false);
+        setExtraPurchaseItems([]);
+        setExtraItemInput("");
+        setExpPaymentMethod("pix");
+        setExpCreditCardId("");
+        setExpInstallments(1);
+        await saveUserData({ expenses: updated });
+        return;
       }
     }
+
+    if (expAmount === "") return;
 
     const total = parseMaskedCurrency(expAmount);
     let paymentLabel = "Pix / Débito";
@@ -550,7 +723,7 @@ export default function App() {
 
     const newExpense = {
       id: Date.now().toString(),
-      what: expWhat.trim(),
+      what: combinedWhat,
       where: expWhere.trim(),
       totalAmount: total,
       category: finalCategory,
@@ -559,7 +732,8 @@ export default function App() {
       paymentLabel,
       installments,
       installmentValue,
-      startCycle: sanitizeCycle(currentCycle),
+      isMultiple: isMultiplePurchase,
+      startCycle: cycleNow,
       createdAt: new Date().toLocaleDateString("pt-BR"),
     };
 
@@ -568,27 +742,29 @@ export default function App() {
     setExpWhat("");
     setExpWhere("");
     setExpAmount("");
-    setExpCategory("Alimentação");
-    setNewCategoryInput("");
+    setIsMultiplePurchase(false);
+    setExtraPurchaseItems([]);
+    setExtraItemInput("");
     setExpPaymentMethod("pix");
     setExpCreditCardId("");
     setExpInstallments(1);
-    await saveUserData({ expenses: updated, customCategories: updatedCategories });
+    await saveUserData({ expenses: updated });
   };
 
   const startEditExpense = (exp) => {
     setEditingExpId(exp.id);
     setEditExpWhat(exp.what);
     setEditExpWhere(exp.where);
-    setEditExpAmount((exp.totalAmount * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+    setEditExpAmount(numberToMaskedCurrency(exp.totalAmount));
     setEditExpCategory(exp.category || "Alimentação");
     setEditExpPaymentMethod(exp.paymentMethod || "pix");
     setEditExpCreditCardId(exp.paymentSource || "");
     setEditExpInstallments(exp.installments || 1);
   };
 
-  const handleSaveExpenseEdit = async (id) => {
-    if (!editExpWhat.trim() || !editExpWhere.trim()) return;
+  const handleSaveExpenseEdit = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!editingExpId || !editExpWhat.trim() || !editExpWhere.trim()) return;
     const total = parseMaskedCurrency(editExpAmount);
     let paymentLabel = "Pix / Débito";
     let paymentSource = editExpPaymentMethod;
@@ -608,7 +784,7 @@ export default function App() {
     const installmentValue = installments > 1 ? total / installments : total;
 
     const updated = expenses.map((exp) =>
-      exp.id === id
+      exp.id === editingExpId
         ? {
             ...exp,
             what: editExpWhat.trim(),
@@ -687,6 +863,24 @@ export default function App() {
     if (showOnlyActiveInCycle) return info.status === "active";
     return true;
   });
+
+  const matchedCardPurchase =
+    isMultiplePurchase && expPaymentMethod === "credito" && expWhere.trim() && expCreditCardId
+      ? expenses.find((item) => {
+          const itemIsCredit =
+            item.paymentMethod === "credito" ||
+            String(item.paymentLabel || "").startsWith("Cartão:");
+          return (
+            itemIsCredit &&
+            String(item.where || "").trim().toLowerCase() ===
+              expWhere.trim().toLowerCase() &&
+            String(item.paymentSource || "") === String(expCreditCardId) &&
+            Math.max(1, toSafeInt(item.installments, 1)) ===
+              Math.max(1, Number(expInstallments) || 1) &&
+            sanitizeCycle(item.startCycle) === sanitizeCycle(currentCycle)
+          );
+        })
+      : null;
 
   if (loadingAuth) {
     return (
@@ -912,6 +1106,190 @@ export default function App() {
         </div>
       )}
 
+      {/* CARD / MODAL PARA EDITAR GASTO DO HISTÓRICO */}
+      {editingExpId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-4 select-none">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200 dark:border-slate-800">
+              <div className="flex items-center gap-2 text-amber-500">
+                <Pencil size={18} />
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">Editar Gasto</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingExpId(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveExpenseEdit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">O que foi gasto?</label>
+                <input
+                  type="text"
+                  required
+                  value={editExpWhat}
+                  onChange={(e) => setEditExpWhat(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm text-slate-900 dark:text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Onde foi gasto?</label>
+                  <input
+                    type="text"
+                    required
+                    value={editExpWhere}
+                    onChange={(e) => setEditExpWhere(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Valor Total (R$)</label>
+                  <input
+                    type="text"
+                    required
+                    value={editExpAmount}
+                    onChange={(e) => setEditExpAmount(maskCurrencyInput(e.target.value))}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold text-slate-900 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">Categoria</label>
+                <div className="relative group">
+                  <select
+                    value={editExpCategory}
+                    onChange={(e) => setEditExpCategory(e.target.value)}
+                    style={{ colorScheme: darkMode ? "dark" : "light" }}
+                    className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:border-amber-500/60 focus:outline-none focus:border-amber-500"
+                  >
+                    {customCategories.map((cat) => (
+                      <option key={cat} value={cat} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown
+                    size={16}
+                    className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-amber-400 transition"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">Forma de Pagamento</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditExpPaymentMethod("pix");
+                      setEditExpCreditCardId("");
+                      setEditExpInstallments(1);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                      editExpPaymentMethod === "pix"
+                        ? "bg-emerald-500 text-white border-emerald-500"
+                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    Pix
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditExpPaymentMethod("debito");
+                      setEditExpCreditCardId("");
+                      setEditExpInstallments(1);
+                    }}
+                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                      editExpPaymentMethod === "debito"
+                        ? "bg-blue-500 text-white border-blue-500"
+                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    Débito
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditExpPaymentMethod("credito")}
+                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                      editExpPaymentMethod === "credito"
+                        ? "bg-purple-600 text-white border-purple-600"
+                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    Crédito
+                  </button>
+                </div>
+              </div>
+
+              {editExpPaymentMethod === "credito" && (
+                <div className="p-3 rounded-xl bg-purple-500/5 border border-purple-500/20 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Cartão</label>
+                    <div className="relative group">
+                      <select
+                        value={editExpCreditCardId}
+                        onChange={(e) => setEditExpCreditCardId(e.target.value)}
+                        style={{ colorScheme: darkMode ? "dark" : "light" }}
+                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs cursor-pointer"
+                      >
+                        <option value="">-- Escolha --</option>
+                        {cards.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Parcelas</label>
+                    <div className="relative group">
+                      <select
+                        value={editExpInstallments}
+                        onChange={(e) => setEditExpInstallments(Number(e.target.value))}
+                        style={{ colorScheme: darkMode ? "dark" : "light" }}
+                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs cursor-pointer"
+                      >
+                        {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+                          <option key={n} value={n}>
+                            {n}x {n > 1 ? `(${formatBRL(parseMaskedCurrency(editExpAmount) / n)})` : "(À vista)"}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingExpId(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+                >
+                  <Check size={15} /> Salvar Alterações
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {viewMode === "code" && user.role === "superadmin" ? (
         <main className="max-w-7xl mx-auto p-4 select-none">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6">
@@ -1040,7 +1418,7 @@ export default function App() {
                   {!isEditingSalary && (
                     <button
                       onClick={() => {
-                        setSalaryInput(salary === 0 ? "" : (salary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+                        setSalaryInput(numberToMaskedCurrency(salary));
                         setIsEditingSalary(true);
                       }}
                       className="flex items-center gap-1 text-xs text-emerald-500 hover:underline cursor-pointer"
@@ -1088,7 +1466,7 @@ export default function App() {
                 ) : (
                   <div
                     onClick={() => {
-                      setSalaryInput(salary === 0 ? "" : (salary * 100).toLocaleString("pt-BR", { minimumFractionDigits: 0 }));
+                      setSalaryInput(numberToMaskedCurrency(salary));
                       setIsEditingSalary(true);
                     }}
                     className="cursor-pointer flex items-center justify-between text-xs"
@@ -1187,15 +1565,24 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-2 mb-3">
-                    <select
-                      value={selectedCardIdForDetails}
-                      onChange={(e) => setSelectedCardIdForDetails(e.target.value)}
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-700/80 hover:border-purple-500/50"
-                    >
-                      {cards.map((c) => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
-                      ))}
-                    </select>
+                    <div className="relative group">
+                      <select
+                        value={selectedCardIdForDetails}
+                        onChange={(e) => setSelectedCardIdForDetails(e.target.value)}
+                        style={{ colorScheme: darkMode ? "dark" : "light" }}
+                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs font-semibold cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
+                      >
+                        {cards.map((c) => (
+                          <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        size={15}
+                        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
+                      />
+                    </div>
 
                     <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 cursor-default">
                       <span className="block text-[11px] text-slate-500 dark:text-slate-400 cursor-default">
@@ -1254,9 +1641,51 @@ export default function App() {
             {/* 1. REGISTRAR NOVO GASTO (LOGO ABAIXO DO SALÁRIO) */}
             <div className="lg:col-span-5 flex flex-col">
               <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col justify-between h-full">
-                <div className="flex items-center gap-2 mb-4 text-emerald-500 cursor-default">
-                  <ShoppingBag size={20} />
-                  <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Registrar Novo Gasto</h2>
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2 text-emerald-500 cursor-default">
+                      <ShoppingBag size={20} />
+                      <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Registrar Novo Gasto</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingCategory(!isAddingCategory)}
+                      className="flex items-center gap-1 text-xs font-medium text-emerald-500 hover:text-emerald-400 hover:underline cursor-pointer transition"
+                    >
+                      <Plus size={13} /> {isAddingCategory ? "Fechar" : "Nova Categoria"}
+                    </button>
+                  </div>
+
+                  {isAddingCategory && (
+                    <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-2">
+                      <span className="block text-[11px] font-semibold text-emerald-400 cursor-default">
+                        Adicionar Nova Categoria
+                      </span>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          autoFocus
+                          placeholder="Ex: Pets, Assinaturas, Viagem..."
+                          value={newCategoryInput}
+                          onChange={(e) => setNewCategoryInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              handleCreateCategory();
+                            }
+                          }}
+                          className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleCreateCategory}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer transition flex items-center gap-1"
+                        >
+                          <Check size={14} /> Salvar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <form onSubmit={handleAddExpense} className="space-y-3">
@@ -1264,11 +1693,82 @@ export default function App() {
                     <label className="block text-xs text-slate-500 mb-1">O que foi gasto?</label>
                     <input
                       type="text"
-                      placeholder="Ex: Supermercado, Jantar..."
+                      placeholder="Ex: Teclado X98PRO, Supermercado..."
                       value={expWhat}
-                      onChange={(e) => setExpWhat(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setExpWhat(val);
+                        if (!val.trim()) {
+                          setIsMultiplePurchase(false);
+                          setExtraPurchaseItems([]);
+                          setExtraItemInput("");
+                        }
+                      }}
                       className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
                     />
+
+                    {expWhat.trim().length > 0 && (
+                      <div className="mt-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80 space-y-2">
+                        <label className="flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isMultiplePurchase}
+                            onChange={(e) => setIsMultiplePurchase(e.target.checked)}
+                            className="w-4 h-4 rounded accent-emerald-500 cursor-pointer"
+                          />
+                          <span>Foi uma compra múltipla? (mesmo uso de cartão / pacote)</span>
+                        </label>
+
+                        {isMultiplePurchase && (
+                          <div className="pt-1 space-y-2">
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                              Adicione outros itens desta mesma compra ou agrupe com uma compra já lançada do mesmo local e parcelas sem descontar o limite duas vezes:
+                            </p>
+                            <div className="flex gap-1.5">
+                              <input
+                                type="text"
+                                placeholder="Outro item na mesma compra..."
+                                value={extraItemInput}
+                                onChange={(e) => setExtraItemInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    handleAddExtraItem();
+                                  }
+                                }}
+                                className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleAddExtraItem}
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer flex items-center gap-1"
+                              >
+                                <Plus size={13} /> Item
+                              </button>
+                            </div>
+                            {extraPurchaseItems.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 pt-1">
+                                {extraPurchaseItems.map((it, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[11px] font-medium"
+                                  >
+                                    {it}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveExtraItem(idx)}
+                                      className="hover:text-rose-400 cursor-pointer"
+                                    >
+                                      <X size={11} />
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Onde foi gasto?</label>
@@ -1293,29 +1793,25 @@ export default function App() {
 
                   <div>
                     <label className="block text-xs text-slate-500 mb-1 cursor-default">Categoria</label>
-                    <select
-                      value={expCategory}
-                      onChange={(e) => setExpCategory(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                    >
-                      {customCategories.map((cat) => (
-                        <option key={cat} value={cat}>{cat}</option>
-                      ))}
-                      <option value="nova">+ Criar nova categoria...</option>
-                    </select>
-                  </div>
-
-                  {expCategory === "nova" && (
-                    <div>
-                      <input
-                        type="text"
-                        placeholder="Nome da nova categoria"
-                        value={newCategoryInput}
-                        onChange={(e) => setNewCategoryInput(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                    <div className="relative group">
+                      <select
+                        value={expCategory}
+                        onChange={(e) => setExpCategory(e.target.value)}
+                        style={{ colorScheme: darkMode ? "dark" : "light" }}
+                        className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-emerald-500/60 focus:outline-none focus:border-emerald-500"
+                      >
+                        {customCategories.map((cat) => (
+                          <option key={cat} value={cat} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        size={16}
+                        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-emerald-400 transition"
                       />
                     </div>
-                  )}
+                  </div>
 
                   <div>
                     <label className="block text-xs text-slate-500 mb-1 cursor-default">Forma de Pagamento</label>
@@ -1348,30 +1844,53 @@ export default function App() {
                     <div className="p-3 rounded-xl bg-purple-500/5 border border-purple-500/20 space-y-2.5">
                       <div>
                         <label className="block text-xs text-slate-500 mb-1 cursor-default">Selecione o Cartão</label>
-                        <select
-                          value={expCreditCardId}
-                          onChange={(e) => setExpCreditCardId(e.target.value)}
-                          required
-                          className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                        >
-                          <option value="">-- Escolha o Cartão --</option>
-                          {cards.map((c) => (
-                            <option key={c.id} value={c.id}>{c.name} (Lim: {formatBRL(c.limit)})</option>
-                          ))}
-                        </select>
+                        <div className="relative group">
+                          <select
+                            value={expCreditCardId}
+                            onChange={(e) => setExpCreditCardId(e.target.value)}
+                            required
+                            style={{ colorScheme: darkMode ? "dark" : "light" }}
+                            className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
+                          >
+                            <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">-- Escolha o Cartão --</option>
+                            {cards.map((c) => (
+                              <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                                {c.name} (Lim: {formatBRL(c.limit)})
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDown
+                            size={16}
+                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
+                          />
+                        </div>
                       </div>
                       <div>
                         <label className="block text-xs text-slate-500 mb-1 cursor-default">Parcelas</label>
-                        <select
-                          value={expInstallments}
-                          onChange={(e) => setExpInstallments(Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm cursor-pointer"
-                        >
-                          {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
-                            <option key={n} value={n}>{n}x {n > 1 ? `de ${formatBRL(parseMaskedCurrency(expAmount) / n)}` : "(À vista)"}</option>
-                          ))}
-                        </select>
+                        <div className="relative group">
+                          <select
+                            value={expInstallments}
+                            onChange={(e) => setExpInstallments(Number(e.target.value))}
+                            style={{ colorScheme: darkMode ? "dark" : "light" }}
+                            className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
+                          >
+                            {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
+                              <option key={n} value={n} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                                {n}x {n > 1 ? `de ${formatBRL(parseMaskedCurrency(expAmount) / n)}` : "(À vista)"}
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDown
+                            size={16}
+                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
+                          />
+                        </div>
                       </div>
+                      {matchedCardPurchase && (
+                        <div className="p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/30 text-[11px] text-purple-300 cursor-default">
+                          Compra única detectada em <strong>{matchedCardPurchase.where}</strong> ({expInstallments}x): este item será agrupado junto com <strong>{matchedCardPurchase.what}</strong> no histórico sem descontar o limite novamente.
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1430,157 +1949,76 @@ export default function App() {
                         displayedExpenses.map((exp) => {
                           const cycleInfo = getExpenseCycleStatus(exp, currentCycle);
                           const isPaid = cycleInfo.status === "paid";
+                          const isFuture = cycleInfo.status === "future";
                           return (
-                          <tr key={exp.id} className={isPaid ? "opacity-50" : ""}>
-                            {editingExpId === exp.id ? (
-                              <>
-                                <td className="py-2 pr-1">
-                                  <input
-                                    type="text"
-                                    value={editExpWhat}
-                                    onChange={(e) => setEditExpWhat(e.target.value)}
-                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                  />
-                                </td>
-                                <td className="py-2 pr-1">
-                                  <input
-                                    type="text"
-                                    value={editExpWhere}
-                                    onChange={(e) => setEditExpWhere(e.target.value)}
-                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                  />
-                                </td>
-                                <td className="py-2 pr-1">
-                                  <select
-                                    value={editExpCategory}
-                                    onChange={(e) => setEditExpCategory(e.target.value)}
-                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
-                                  >
-                                    {customCategories.map((cat) => (
-                                      <option key={cat} value={cat}>{cat}</option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td className="py-2 pr-1">
-                                  <select
-                                    value={editExpPaymentMethod}
-                                    onChange={(e) => setEditExpPaymentMethod(e.target.value)}
-                                    className="w-full px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs cursor-pointer"
-                                  >
-                                    <option value="pix">Pix</option>
-                                    <option value="debito">Débito</option>
-                                    <option value="credito">Crédito</option>
-                                  </select>
-                                </td>
-                                <td className="py-2 pr-1">
-                                  {editExpPaymentMethod === "credito" ? (
-                                    <input
-                                      type="number"
-                                      min="1"
-                                      max="24"
-                                      value={editExpInstallments}
-                                      onChange={(e) => setEditExpInstallments(Number(e.target.value))}
-                                      className="w-12 px-1 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                    />
-                                  ) : (
-                                    <span className="text-xs text-slate-400">1x</span>
-                                  )}
-                                </td>
-                                <td className="py-2 pr-1">
-                                  <input
-                                    type="text"
-                                    value={editExpAmount}
-                                    onChange={(e) => setEditExpAmount(maskCurrencyInput(e.target.value))}
-                                    className="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                  />
-                                </td>
-                                <td className="py-2 text-right space-x-1">
-                                  <button onClick={() => handleSaveExpenseEdit(exp.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
-                                    <Check size={14} />
-                                  </button>
-                                  <button onClick={() => setEditingExpId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
-                                    <X size={14} />
-                                  </button>
-                                </td>
-                              </>
-                            ) : (
-                              <>
-                                {(() => {
-                                  const isFuture = cycleInfo.status === "future";
-                                  return (
-                                    <>
-                                      <td className={`py-3 font-medium cursor-default ${isPaid ? "line-through text-slate-400" : ""}`}>
-                                        {exp.what}
-                                      </td>
-                                      <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
-                                      <td className="py-3 cursor-default">
-                                        <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
-                                          {exp.category || "Geral"}
-                                        </span>
-                                      </td>
-                                      <td className="py-3 cursor-default">{exp.paymentLabel}</td>
-                                      <td className="py-3 cursor-default">
-                                        {isPaid ? (
-                                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold text-[11px]">
-                                            <CheckCircle2 size={12} /> Quitado ({cycleInfo.totalInstallments}/{cycleInfo.totalInstallments})
-                                          </span>
-                                        ) : isFuture ? (
-                                          <span className="text-slate-400 text-[11px]">
-                                            Inicia em ciclo futuro ({cycleInfo.totalInstallments}x)
-                                          </span>
-                                        ) : Number(exp.installments) > 1 ? (
-                                          <div>
-                                            <span className="font-bold text-amber-500">
-                                              {cycleInfo.currentInstallment}/{cycleInfo.totalInstallments}
-                                            </span>{" "}
-                                            de{" "}
-                                            <span className="font-medium cursor-default">
-                                              {formatBRL(exp.installmentValue)}
-                                            </span>
-                                          </div>
-                                        ) : (
-                                          <span className="cursor-default font-medium text-emerald-400">
-                                            1/1 (À vista)
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="py-3 font-bold cursor-default">
-                                        {isPaid ? (
-                                          <span className="text-emerald-500 text-xs">R$ 0,00</span>
-                                        ) : (
-                                          <div>
-                                            <span>{formatBRL(cycleInfo.remainingAmount)}</span>
-                                            {Number(exp.installments) > 1 && cycleInfo.currentInstallment > 1 && (
-                                              <span className="block text-[10px] font-normal text-slate-400">
-                                                de {formatBRL(exp.totalAmount)}
-                                              </span>
-                                            )}
-                                          </div>
-                                        )}
-                                      </td>
-                                      <td className="py-3 text-right space-x-2">
-                                        <button
-                                          onClick={() => startEditExpense(exp)}
-                                          className="text-slate-400 hover:text-amber-500 cursor-pointer"
-                                          title="Editar gasto"
-                                        >
-                                          <Pencil size={14} />
-                                        </button>
-                                        <button
-                                          onClick={() => handleRemoveExpense(exp.id)}
-                                          className="text-slate-400 hover:text-red-500 cursor-pointer"
-                                          title="Excluir gasto"
-                                        >
-                                          <Trash2 size={15} />
-                                        </button>
-                                      </td>
-                                    </>
-                                  );
-                                })()}
-                              </>
-                            )}
-                          </tr>
-                        );
+                            <tr key={exp.id} className={isPaid ? "opacity-50" : ""}>
+                              <td className={`py-3 font-medium cursor-default ${isPaid ? "line-through text-slate-400" : ""}`}>
+                                {exp.what}
+                              </td>
+                              <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
+                              <td className="py-3 cursor-default">
+                                <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
+                                  {exp.category || "Geral"}
+                                </span>
+                              </td>
+                              <td className="py-3 cursor-default">{exp.paymentLabel}</td>
+                              <td className="py-3 cursor-default">
+                                {isPaid ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold text-[11px]">
+                                    <CheckCircle2 size={12} /> Quitado ({cycleInfo.totalInstallments}/{cycleInfo.totalInstallments})
+                                  </span>
+                                ) : isFuture ? (
+                                  <span className="text-slate-400 text-[11px]">
+                                    Inicia em ciclo futuro ({cycleInfo.totalInstallments}x)
+                                  </span>
+                                ) : Number(exp.installments) > 1 ? (
+                                  <div>
+                                    <span className="font-bold text-amber-500">
+                                      {cycleInfo.currentInstallment}/{cycleInfo.totalInstallments}
+                                    </span>{" "}
+                                    de{" "}
+                                    <span className="font-medium cursor-default">
+                                      {formatBRL(exp.installmentValue)}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="cursor-default font-medium text-emerald-400">
+                                    1/1 (À vista)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 font-bold cursor-default">
+                                {isPaid ? (
+                                  <span className="text-emerald-500 text-xs">R$ 0,00</span>
+                                ) : (
+                                  <div>
+                                    <span>{formatBRL(cycleInfo.remainingAmount)}</span>
+                                    {Number(exp.installments) > 1 && cycleInfo.currentInstallment > 1 && (
+                                      <span className="block text-[10px] font-normal text-slate-400">
+                                        de {formatBRL(exp.totalAmount)}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3 text-right space-x-2">
+                                <button
+                                  onClick={() => startEditExpense(exp)}
+                                  className="text-slate-400 hover:text-amber-500 cursor-pointer"
+                                  title="Editar gasto"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  onClick={() => handleRemoveExpense(exp.id)}
+                                  className="text-slate-400 hover:text-red-500 cursor-pointer"
+                                  title="Excluir gasto"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
                         })
                       )}
                     </tbody>
