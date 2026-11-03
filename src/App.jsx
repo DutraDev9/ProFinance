@@ -110,6 +110,19 @@ const toSafeNumber = (val, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const clampDay = (val, fallback = 1) => {
+  const n = parseInt(val, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(31, Math.max(1, n));
+};
+
+const isCardInvoiceClosedToday = (card) => {
+  if (!card || !card.closingDay) return false;
+  const todayDay = new Date().getDate();
+  const closingDay = clampDay(card.closingDay, 1);
+  return todayDay >= closingDay;
+};
+
 const sanitizeCycle = (val) => {
   if (typeof val === "number" && Number.isFinite(val) && Math.abs(val) < 500) {
     return Math.trunc(val);
@@ -221,10 +234,14 @@ export default function App() {
 
   const [cardName, setCardName] = useState("");
   const [cardLimit, setCardLimit] = useState("");
+  const [cardClosingDay, setCardClosingDay] = useState("1");
+  const [cardDueDay, setCardDueDay] = useState("10");
   const [selectedCardIdForDetails, setSelectedCardIdForDetails] = useState("");
   const [editingCardId, setEditingCardId] = useState(null);
   const [editCardName, setEditCardName] = useState("");
   const [editCardLimit, setEditCardLimit] = useState("");
+  const [editCardClosingDay, setEditCardClosingDay] = useState("1");
+  const [editCardDueDay, setEditCardDueDay] = useState("10");
 
   const [expWhat, setExpWhat] = useState("");
   const [expWhere, setExpWhere] = useState("");
@@ -557,7 +574,13 @@ export default function App() {
     e.preventDefault();
     if (!cardName.trim() || cardLimit === "") return;
     const parsedLimit = parseMaskedCurrency(cardLimit);
-    const newCard = { id: Date.now().toString(), name: cardName.trim(), limit: parsedLimit };
+    const newCard = {
+      id: Date.now().toString(),
+      name: cardName.trim(),
+      limit: parsedLimit,
+      closingDay: clampDay(cardClosingDay, 1),
+      dueDay: clampDay(cardDueDay, 10),
+    };
     const updated = [...cards, newCard];
     setCards(updated);
     if (!selectedCardIdForDetails) {
@@ -565,6 +588,8 @@ export default function App() {
     }
     setCardName("");
     setCardLimit("");
+    setCardClosingDay("1");
+    setCardDueDay("10");
     await saveUserData({ cards: updated });
   };
 
@@ -572,13 +597,21 @@ export default function App() {
     setEditingCardId(card.id);
     setEditCardName(card.name);
     setEditCardLimit(numberToMaskedCurrency(card.limit));
+    setEditCardClosingDay(String(card.closingDay || 1));
+    setEditCardDueDay(String(card.dueDay || 10));
   };
 
   const handleSaveCardEdit = async (id) => {
     if (!editCardName.trim()) return;
     const newName = editCardName.trim();
     const parsedLimit = parseMaskedCurrency(editCardLimit);
-    const updatedCards = cards.map((c) => (c.id === id ? { ...c, name: newName, limit: parsedLimit } : c));
+    const closing = clampDay(editCardClosingDay, 1);
+    const due = clampDay(editCardDueDay, 10);
+    const updatedCards = cards.map((c) =>
+      c.id === id
+        ? { ...c, name: newName, limit: parsedLimit, closingDay: closing, dueDay: due }
+        : c
+    );
     const updatedExpenses = expenses.map((exp) => (exp.paymentSource === id ? { ...exp, paymentLabel: `Cartão: ${newName}` } : exp));
     setCards(updatedCards);
     setExpenses(updatedExpenses);
@@ -627,6 +660,14 @@ export default function App() {
 
     const finalCategory = expCategory || "Alimentação";
     const cycleNow = sanitizeCycle(currentCycle);
+    const chosenCard =
+      expPaymentMethod === "credito"
+        ? cards.find((c) => c.id === expCreditCardId)
+        : null;
+    const targetStartCycle =
+      chosenCard && isCardInvoiceClosedToday(chosenCard)
+        ? cycleNow + 1
+        : cycleNow;
 
     const allItemsList = [
       expWhat.trim(),
@@ -649,7 +690,7 @@ export default function App() {
           String(item.where || "").trim().toLowerCase() === normWhere &&
           String(item.paymentSource || "") === String(paymentSource) &&
           Math.max(1, toSafeInt(item.installments, 1)) === installments &&
-          sanitizeCycle(item.startCycle) === cycleNow
+          sanitizeCycle(item.startCycle) === targetStartCycle
         );
       });
 
@@ -713,8 +754,7 @@ export default function App() {
     } else if (expPaymentMethod === "debito") {
       paymentLabel = "Cartão de Débito";
     } else if (expPaymentMethod === "credito") {
-      const selectedCard = cards.find((c) => c.id === expCreditCardId);
-      paymentLabel = selectedCard ? `Cartão: ${selectedCard.name}` : "Cartão de Crédito";
+      paymentLabel = chosenCard ? `Cartão: ${chosenCard.name}` : "Cartão de Crédito";
       paymentSource = expCreditCardId || "credito";
       installments = Math.max(1, Number(expInstallments) || 1);
     }
@@ -733,7 +773,7 @@ export default function App() {
       installments,
       installmentValue,
       isMultiple: isMultiplePurchase,
-      startCycle: cycleNow,
+      startCycle: targetStartCycle,
       createdAt: new Date().toLocaleDateString("pt-BR"),
     };
 
@@ -864,6 +904,15 @@ export default function App() {
     return true;
   });
 
+  const selectedExpenseCardObj =
+    expPaymentMethod === "credito"
+      ? cards.find((c) => c.id === expCreditCardId)
+      : null;
+  const isSelectedExpenseCardClosed = isCardInvoiceClosedToday(selectedExpenseCardObj);
+  const expectedExpenseStartCycle = isSelectedExpenseCardClosed
+    ? sanitizeCycle(currentCycle) + 1
+    : sanitizeCycle(currentCycle);
+
   const matchedCardPurchase =
     isMultiplePurchase && expPaymentMethod === "credito" && expWhere.trim() && expCreditCardId
       ? expenses.find((item) => {
@@ -877,7 +926,7 @@ export default function App() {
             String(item.paymentSource || "") === String(expCreditCardId) &&
             Math.max(1, toSafeInt(item.installments, 1)) ===
               Math.max(1, Number(expInstallments) || 1) &&
-            sanitizeCycle(item.startCycle) === sanitizeCycle(currentCycle)
+            sanitizeCycle(item.startCycle) === expectedExpenseStartCycle
           );
         })
       : null;
@@ -1497,54 +1546,109 @@ export default function App() {
                 {isEditingCards ? (
                   <div className="space-y-3 mb-2">
                     <form onSubmit={handleAddCard} className="space-y-2">
-                      <div className="flex gap-2">
+                      <div className="flex gap-1.5">
                         <input
                           type="text"
                           placeholder="Nome (ex: Nubank)"
                           value={cardName}
                           onChange={(e) => setCardName(e.target.value)}
-                          className="flex-1 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
+                          className="flex-1 min-w-0 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
                         />
                         <input
                           type="text"
                           placeholder="Limite R$"
                           value={cardLimit}
                           onChange={(e) => setCardLimit(maskCurrencyInput(e.target.value))}
-                          className="w-20 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
+                          className="w-24 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
                         />
-                        <button type="submit" className="p-1.5 rounded-lg bg-purple-600 text-white cursor-pointer" title="Adicionar">
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex-1 flex items-center gap-1 bg-slate-50 dark:bg-slate-800/70 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700">
+                          <span className="text-[10px] text-slate-400">Fecha dia:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={31}
+                            value={cardClosingDay}
+                            onChange={(e) => setCardClosingDay(e.target.value)}
+                            className="w-10 bg-transparent text-xs font-bold text-center focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex-1 flex items-center gap-1 bg-slate-50 dark:bg-slate-800/70 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700">
+                          <span className="text-[10px] text-slate-400">Vence dia:</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={31}
+                            value={cardDueDay}
+                            onChange={(e) => setCardDueDay(e.target.value)}
+                            className="w-10 bg-transparent text-xs font-bold text-center focus:outline-none"
+                          />
+                        </div>
+                        <button type="submit" className="p-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white cursor-pointer" title="Adicionar Cartão">
                           <Plus size={16} />
                         </button>
                       </div>
                     </form>
 
-                    <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto">
                       {cards.map((c) => (
-                        <div key={c.id} className="flex items-center justify-between p-2 rounded bg-slate-50 dark:bg-slate-800/60 text-xs">
+                        <div key={c.id} className="p-2 rounded bg-slate-50 dark:bg-slate-800/60 text-xs">
                           {editingCardId === c.id ? (
-                            <div className="flex items-center gap-1 w-full">
-                              <input
-                                type="text"
-                                value={editCardName}
-                                onChange={(e) => setEditCardName(e.target.value)}
-                                className="flex-1 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                              />
-                              <input
-                                type="text"
-                                value={editCardLimit}
-                                onChange={(e) => setEditCardLimit(maskCurrencyInput(e.target.value))}
-                                className="w-16 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                              />
-                              <button onClick={() => handleSaveCardEdit(c.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
-                                <Check size={14} />
-                              </button>
-                              <button onClick={() => setEditingCardId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
-                                <X size={14} />
-                              </button>
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-1 w-full">
+                                <input
+                                  type="text"
+                                  value={editCardName}
+                                  onChange={(e) => setEditCardName(e.target.value)}
+                                  className="flex-1 min-w-0 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                                <input
+                                  type="text"
+                                  value={editCardLimit}
+                                  onChange={(e) => setEditCardLimit(maskCurrencyInput(e.target.value))}
+                                  className="w-20 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                              </div>
+                              <div className="flex items-center justify-between gap-1">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[10px] text-slate-400">Fecha:</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={31}
+                                    value={editCardClosingDay}
+                                    onChange={(e) => setEditCardClosingDay(e.target.value)}
+                                    className="w-11 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-center"
+                                  />
+                                  <span className="text-[10px] text-slate-400 ml-1">Vence:</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={31}
+                                    value={editCardDueDay}
+                                    onChange={(e) => setEditCardDueDay(e.target.value)}
+                                    className="w-11 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-center"
+                                  />
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <button onClick={() => handleSaveCardEdit(c.id)} className="p-1 text-emerald-500 cursor-pointer" title="Salvar">
+                                    <Check size={14} />
+                                  </button>
+                                  <button onClick={() => setEditingCardId(null)} className="p-1 text-slate-400 cursor-pointer" title="Cancelar">
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           ) : (
-                            <>
-                              <span className="font-medium">{c.name} ({formatBRL(c.limit)})</span>
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <span className="font-medium block">{c.name} ({formatBRL(c.limit)})</span>
+                                <span className="text-[10px] text-slate-400">
+                                  Fecha dia {c.closingDay || 1} • Vence dia {c.dueDay || 10}
+                                </span>
+                              </div>
                               <div className="flex items-center gap-1.5">
                                 <button onClick={() => startEditCard(c)} className="text-slate-400 hover:text-purple-500 cursor-pointer" title="Editar">
                                   <Pencil size={12} />
@@ -1553,7 +1657,7 @@ export default function App() {
                                   <Trash2 size={12} />
                                 </button>
                               </div>
-                            </>
+                            </div>
                           )}
                         </div>
                       ))}
@@ -1585,11 +1689,27 @@ export default function App() {
                     </div>
 
                     <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 cursor-default">
-                      <span className="block text-[11px] text-slate-500 dark:text-slate-400 cursor-default">
-                        Limite Disponível ({selectedCardObj?.name || "Cartão"})
-                      </span>
-                      <span className="text-2xl font-extrabold text-purple-400 cursor-default">
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400 cursor-default">
+                          Limite Disponível ({selectedCardObj?.name || "Cartão"})
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            isCardInvoiceClosedToday(selectedCardObj)
+                              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                              : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                          }`}
+                        >
+                          {isCardInvoiceClosedToday(selectedCardObj)
+                            ? "Compras p/ próx. mês"
+                            : "Fatura aberta"}
+                        </span>
+                      </div>
+                      <span className="text-2xl font-extrabold text-purple-400 cursor-default block">
                         {formatBRL(selectedCardAvailable)}
+                      </span>
+                      <span className="block text-[11px] text-slate-400 mt-1 cursor-default">
+                        Fecha dia <strong>{selectedCardObj?.closingDay || 1}</strong> • Vence dia <strong>{selectedCardObj?.dueDay || 10}</strong>
                       </span>
                     </div>
                   </div>
@@ -1886,6 +2006,29 @@ export default function App() {
                           />
                         </div>
                       </div>
+                      {selectedExpenseCardObj && (
+                        <div
+                          className={`p-2.5 rounded-lg border text-[11px] cursor-default ${
+                            isSelectedExpenseCardClosed
+                              ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                              : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                          }`}
+                        >
+                          {isSelectedExpenseCardClosed ? (
+                            <>
+                              A fatura do <strong>{selectedExpenseCardObj.name}</strong> fechou dia{" "}
+                              <strong>{selectedExpenseCardObj.closingDay || 1}</strong> (vence dia{" "}
+                              <strong>{selectedExpenseCardObj.dueDay || 10}</strong>). Esta compra ocupará o limite agora, mas a{" "}
+                              <strong>1ª parcela só virá no próximo mês ({getCycleLabel(expectedExpenseStartCycle)})</strong>.
+                            </>
+                          ) : (
+                            <>
+                              Fatura aberta (fecha dia <strong>{selectedExpenseCardObj.closingDay || 1}</strong> • vence dia{" "}
+                              <strong>{selectedExpenseCardObj.dueDay || 10}</strong>). A 1ª parcela será cobrada na fatura deste mês.
+                            </>
+                          )}
+                        </div>
+                      )}
                       {matchedCardPurchase && (
                         <div className="p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/30 text-[11px] text-purple-300 cursor-default">
                           Compra única detectada em <strong>{matchedCardPurchase.where}</strong> ({expInstallments}x): este item será agrupado junto com <strong>{matchedCardPurchase.what}</strong> no histórico sem descontar o limite novamente.
@@ -1968,8 +2111,8 @@ export default function App() {
                                     <CheckCircle2 size={12} /> Quitado ({cycleInfo.totalInstallments}/{cycleInfo.totalInstallments})
                                   </span>
                                 ) : isFuture ? (
-                                  <span className="text-slate-400 text-[11px]">
-                                    Inicia em ciclo futuro ({cycleInfo.totalInstallments}x)
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 font-medium text-[11px]">
+                                    Próx. Fatura ({cycleInfo.totalInstallments}x de {formatBRL(exp.installmentValue)})
                                   </span>
                                 ) : Number(exp.installments) > 1 ? (
                                   <div>
