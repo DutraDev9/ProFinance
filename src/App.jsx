@@ -46,6 +46,9 @@ import {
   RotateCcw,
   KeyRound,
   CheckCircle2,
+  FileText,
+  Upload,
+  Loader2,
 } from "lucide-react";
 
 const firebaseConfig = {
@@ -121,6 +124,169 @@ const isCardInvoiceClosedToday = (card) => {
   const todayDay = new Date().getDate();
   const closingDay = clampDay(card.closingDay, 1);
   return todayDay >= closingDay;
+};
+
+const loadPdfJsLibrary = async () => {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  return window.pdfjsLib;
+};
+
+const extractTextFromPdfFile = async (file) => {
+  const pdfjsLib = await loadPdfJsLibrary();
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = "";
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const strings = content.items.map((item) => item.str);
+    fullText += strings.join(" ") + "\n";
+  }
+  return fullText;
+};
+
+const guessCategoryFromText = (desc) => {
+  const lower = String(desc || "").toLowerCase();
+  if (/ifood|restaurante|lanch|burger|pizza|padaria|mercado|supermercado|atacad|carrefour|assai|acai|cafe|bar|doce/.test(lower)) {
+    return "Alimentação";
+  }
+  if (/uber|99|posto|gasolina|combustivel|estacionamento|pedagio|onibus|metro|passagem|latam|gol|azul/.test(lower)) {
+    return "Transporte";
+  }
+  if (/farmacia|droga|hospital|clinica|medico|exame|drogasil|pague menos|raia/.test(lower)) {
+    return "Saúde";
+  }
+  if (/netflix|spotify|steam|cinema|ingresso|playstation|xbox|nintendo|jogo|prime|disney|hbo/.test(lower)) {
+    return "Lazer";
+  }
+  if (/curso|faculdade|escola|livro|udemy|alura|educa/.test(lower)) {
+    return "Educação";
+  }
+  return "Compras";
+};
+
+const parseInvoiceTextFallback = (rawText, fileName, userCards) => {
+  const combinedSource = `${fileName || ""}\n${rawText || ""}`;
+  let detectedCardName = "";
+
+  for (const c of userCards || []) {
+    if (c.name && new RegExp(c.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(combinedSource)) {
+      detectedCardName = c.name;
+      break;
+    }
+  }
+
+  if (!detectedCardName) {
+    const knownBanks = [
+      { regex: /nubank|nu pagamentos/i, name: "Nubank" },
+      { regex: /mercado\s*pago/i, name: "Mercado Pago" },
+      { regex: /inter|banco inter/i, name: "Inter" },
+      { regex: /ita[uú]|itaucard/i, name: "Itaú" },
+      { regex: /bradesco/i, name: "Bradesco" },
+      { regex: /santander/i, name: "Santander" },
+      { regex: /c6\s*bank|banco c6/i, name: "C6 Bank" },
+      { regex: /picpay/i, name: "PicPay" },
+      { regex: /caixa/i, name: "Caixa" },
+      { regex: /banco do brasil|ourocard/i, name: "Banco do Brasil" },
+      { regex: /xp\s*investimentos|cartao xp/i, name: "XP" },
+    ];
+    for (const bank of knownBanks) {
+      if (bank.regex.test(combinedSource)) {
+        detectedCardName = bank.name;
+        break;
+      }
+    }
+  }
+
+  if (!detectedCardName) {
+    detectedCardName = userCards?.[0]?.name || "Cartão de Crédito";
+  }
+
+  const ignoreRegex =
+    /pagamento\s*(recebido|fatura|efetuado|minimo|total)|total\s*da\s*fatura|saldo\s*anterior|limite\s*(total|disponivel)|encargos|resumo\s*da\s*fatura|fatura\s*anterior|credito\s*em\s*confianca|estorno/i;
+
+  const normalized = String(rawText || "")
+    .replace(/\s+/g, " ")
+    .replace(/(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+[A-ZÇÃÕÁÉÍÓÚ]{3})/gi, "\n$1");
+
+  const lines = normalized.split("\n");
+  const items = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || ignoreRegex.test(line)) continue;
+
+    const match = line.match(
+      /^(?:\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+[A-ZÇÃÕÁÉÍÓÚ]{3})\s+(.+?)\s+(?:R\$\s*)?(-?\d{1,3}(?:\.\d{3})*,\d{2})\b/i
+    );
+    if (!match) continue;
+
+    let desc = match[1].trim();
+    const amountStr = match[2];
+    if (amountStr.startsWith("-") || ignoreRegex.test(desc)) continue;
+
+    const installmentValue = parseMaskedCurrency(amountStr);
+    if (installmentValue <= 0 || installmentValue > 200000) continue;
+
+    let currentInstallment = 1;
+    let totalInstallments = 1;
+
+    const instMatch =
+      desc.match(/(?:parcela\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i) ||
+      line.match(/(?:parcela\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i);
+
+    if (instMatch) {
+      const cur = parseInt(instMatch[1], 10);
+      const tot = parseInt(instMatch[2], 10);
+      if (cur >= 1 && tot >= cur && tot <= 48) {
+        currentInstallment = cur;
+        totalInstallments = tot;
+        desc = desc.replace(instMatch[0], "").trim();
+      }
+    }
+
+    desc = desc.replace(/[-–•*]+$/g, "").replace(/\s{2,}/g, " ").trim();
+    if (!desc || desc.length < 2) continue;
+
+    let what = desc;
+    let where = desc;
+    if (desc.includes("*")) {
+      const parts = desc.split("*").map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        where = parts[0];
+        what = parts.slice(1).join(" - ");
+      }
+    } else if (desc.includes(" - ")) {
+      const parts = desc.split(" - ").map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        where = parts[0];
+        what = parts.slice(1).join(" - ");
+      }
+    }
+
+    items.push({
+      id: `${Date.now()}-${ items.length}`,
+      what: what.slice(0, 60),
+      where: where.slice(0, 50),
+      installmentValue,
+      currentInstallment,
+      totalInstallments,
+      totalAmount: Number((installmentValue * totalInstallments).toFixed(2)),
+      category: guessCategoryFromText(desc),
+    });
+  }
+
+  return { detectedCardName, items };
 };
 
 const sanitizeCycle = (val) => {
@@ -265,6 +431,11 @@ export default function App() {
   const [editExpPaymentMethod, setEditExpPaymentMethod] = useState("pix");
   const [editExpCreditCardId, setEditExpCreditCardId] = useState("");
   const [editExpInstallments, setEditExpInstallments] = useState(1);
+
+  const [isReadingPdf, setIsReadingPdf] = useState(false);
+  const [pdfModalData, setPdfModalData] = useState(null);
+  const [pdfFeedbackError, setPdfFeedbackError] = useState("");
+  const pdfFileInputRef = React.useRef(null);
 
   const [allUsers, setAllUsers] = useState([]);
 
@@ -845,10 +1016,215 @@ export default function App() {
     await saveUserData({ expenses: updated });
   };
 
-  const handleRemoveExpense = async (id) => {
-    const updated = expenses.filter((exp) => exp.id !== id);
-    setExpenses(updated);
-    await saveUserData({ expenses: updated });
+  const handlePdfFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setIsReadingPdf(true);
+    setPdfFeedbackError("");
+
+    try {
+      let rawText = "";
+      try {
+        rawText = await extractTextFromPdfFile(file);
+      } catch (err) {
+        console.warn("Aviso ao extrair texto com PDF.js:", err);
+      }
+
+      let parsedResult = null;
+
+      try {
+        const base64Data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const res = String(reader.result || "");
+            resolve(res.split(",")[1] || "");
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        const registeredCardNames = cards.map((c) => c.name).join(", ");
+        const promptText = `Analise esta fatura de cartão de crédito em PDF (arquivo: "${file.name}").
+Cartões cadastrados pelo usuário: [${registeredCardNames || "Nenhum"}].
+1. Identifique a qual cartão ou banco esta fatura pertence (se corresponder a um dos cartões cadastrados, use exatamente o mesmo nome).
+2. Extraia APENAS os lançamentos de consumo/compras da fatura (ignore pagamentos de fatura, saldo anterior, totais, limites, juros, IOF ou tarifas de resumo).
+3. Para cada compra, identifique:
+- "what": descrição do produto/compra ou estabelecimento
+- "where": nome da loja/estabelecimento onde foi gasto
+- "installmentValue": valor da parcela cobrada nesta fatura (número em reais, ex: 65.99)
+- "currentInstallment": número da parcela atual (ex: se estiver 03/10, retorne 3; se for à vista, retorne 1)
+- "totalInstallments": quantidade total de parcelas (ex: se estiver 03/10, retorne 10; se for à vista, retorne 1)
+- "category": uma categoria entre ["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"]`;
+
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+        const payload = {
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: promptText },
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    data: base64Data,
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                cardName: { type: "STRING" },
+                items: {
+                  type: "ARRAY",
+                  items: {
+                    type: "OBJECT",
+                    properties: {
+                      what: { type: "STRING" },
+                      where: { type: "STRING" },
+                      installmentValue: { type: "NUMBER" },
+                      currentInstallment: { type: "INTEGER" },
+                      totalInstallments: { type: "INTEGER" },
+                      category: { type: "STRING" },
+                    },
+                    propertyOrdering: [
+                      "what",
+                      "where",
+                      "installmentValue",
+                      "currentInstallment",
+                      "totalInstallments",
+                      "category",
+                    ],
+                  },
+                },
+              },
+              propertyOrdering: ["cardName", "items"],
+            },
+          },
+        };
+
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (jsonText) {
+            const parsedJson = JSON.parse(jsonText);
+            if (Array.isArray(parsedJson.items) && parsedJson.items.length > 0) {
+              parsedResult = {
+                detectedCardName: parsedJson.cardName || "Cartão de Crédito",
+                items: parsedJson.items.map((it, idx) => {
+                  const instVal = Math.max(0, toSafeNumber(it.installmentValue, 0));
+                  const totInst = Math.max(1, toSafeInt(it.totalInstallments, 1));
+                  const curInst = Math.min(totInst, Math.max(1, toSafeInt(it.currentInstallment, 1)));
+                  return {
+                    id: `${Date.now()}-${idx}`,
+                    what: String(it.what || it.where || "Compra na Fatura").trim(),
+                    where: String(it.where || it.what || "Estabelecimento").trim(),
+                    installmentValue: instVal,
+                    currentInstallment: curInst,
+                    totalInstallments: totInst,
+                    totalAmount: Number((instVal * totInst).toFixed(2)),
+                    category: it.category || guessCategoryFromText(it.what),
+                  };
+                }).filter((it) => it.installmentValue > 0),
+              };
+            }
+          }
+        }
+      } catch (aiErr) {
+        console.warn("Usando leitura local do PDF:", aiErr);
+      }
+
+      if (!parsedResult || parsedResult.items.length === 0) {
+        parsedResult = parseInvoiceTextFallback(rawText, file.name, cards);
+      }
+
+      const matchedCard = cards.find(
+        (c) =>
+          c.name.toLowerCase() === String(parsedResult.detectedCardName || "").toLowerCase() ||
+          String(parsedResult.detectedCardName || "").toLowerCase().includes(c.name.toLowerCase()) ||
+          c.name.toLowerCase().includes(String(parsedResult.detectedCardName || "").toLowerCase())
+      );
+
+      setPdfModalData({
+        fileName: file.name,
+        detectedCardName: matchedCard ? matchedCard.name : parsedResult.detectedCardName || "Cartão de Crédito",
+        selectedCardId: matchedCard ? matchedCard.id : cards[0]?.id || "new",
+        items: parsedResult.items || [],
+      });
+    } catch (err) {
+      setPdfFeedbackError("Não foi possível ler o arquivo PDF selecionado.");
+    } finally {
+      setIsReadingPdf(false);
+    }
+  };
+
+  const handleConfirmPdfImport = async () => {
+    if (!pdfModalData) return;
+
+    const cycleNow = sanitizeCycle(currentCycle);
+    let targetCard = cards.find((c) => c.id === pdfModalData.selectedCardId);
+    let updatedCards = [...cards];
+
+    if (!targetCard) {
+      const newCardName = (pdfModalData.detectedCardName || "Cartão Importado").trim();
+      targetCard = {
+        id: Date.now().toString(),
+        name: newCardName,
+        limit: 5000,
+        closingDay: 1,
+        dueDay: 10,
+      };
+      updatedCards = [...cards, targetCard];
+      setCards(updatedCards);
+      if (!selectedCardIdForDetails) {
+        setSelectedCardIdForDetails(targetCard.id);
+      }
+    }
+
+    const importedExpenses = (pdfModalData.items || []).map((item, idx) => {
+      const totalInst = Math.max(1, toSafeInt(item.totalInstallments, 1));
+      const currentInst = Math.min(totalInst, Math.max(1, toSafeInt(item.currentInstallment, 1)));
+      const instValue = Math.max(0, toSafeNumber(item.installmentValue, 0));
+      const totalAmt = Number((instValue * totalInst).toFixed(2));
+      const calculatedStartCycle = cycleNow - (currentInst - 1);
+
+      return {
+        id: `${Date.now()}-${idx}`,
+        what: String(item.what || "Consumo Fatura").trim(),
+        where: String(item.where || "Fatura PDF").trim(),
+        totalAmount: totalAmt,
+        category: item.category || "Compras",
+        paymentMethod: "credito",
+        paymentSource: targetCard.id,
+        paymentLabel: `Cartão: ${targetCard.name}`,
+        installments: totalInst,
+        installmentValue: instValue,
+        isMultiple: false,
+        startCycle: calculatedStartCycle,
+        createdAt: new Date().toLocaleDateString("pt-BR"),
+      };
+    });
+
+    const updatedExpenses = [...importedExpenses, ...expenses];
+    setExpenses(updatedExpenses);
+    setPdfModalData(null);
+    await saveUserData({
+      cards: updatedCards,
+      expenses: updatedExpenses,
+    });
   };
 
   const loadAllUsers = async () => {
@@ -1094,6 +1470,32 @@ export default function App() {
               {darkMode ? <Sun size={18} /> : <Moon size={18} />}
             </button>
 
+            <input
+              ref={pdfFileInputRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={handlePdfFileSelect}
+              className="hidden"
+            />
+
+            <button
+              type="button"
+              disabled={isReadingPdf}
+              onClick={() => pdfFileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 cursor-pointer transition disabled:opacity-60"
+              title="Importar PDF da fatura do cartão de crédito"
+            >
+              {isReadingPdf ? (
+                <>
+                  <Loader2 size={15} className="animate-spin" /> Lendo PDF...
+                </>
+              ) : (
+                <>
+                  <FileText size={15} /> Ler Fatura PDF
+                </>
+              )}
+            </button>
+
             <button
               onClick={() => {
                 setShowPasswordModal(true);
@@ -1151,6 +1553,154 @@ export default function App() {
                 Salvar Senha
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE CONFIRMAÇÃO DE LEITURA DE FATURA PDF */}
+      {pdfModalData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-4 select-none">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200 dark:border-slate-800">
+              <div className="flex items-center gap-2 text-purple-400">
+                <FileText size={20} />
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Confirmação de Leitura de Fatura
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPdfModalData(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-500/30 mb-4">
+              <p className="text-sm font-medium text-slate-800 dark:text-slate-100 leading-relaxed">
+                Você está informando a fatura do{" "}
+                <strong className="text-purple-400 underline decoration-purple-500/50">
+                  {cards.find((c) => c.id === pdfModalData.selectedCardId)?.name ||
+                    pdfModalData.detectedCardName}
+                </strong>{" "}
+                adicionando apenas os detalhes do consumo.
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                Arquivo lido: {pdfModalData.fileName}
+              </p>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-xs text-slate-500 mb-1">
+                Cartão identificado (você pode alterar se desejar):
+              </label>
+              <div className="relative group">
+                <select
+                  value={pdfModalData.selectedCardId}
+                  onChange={(e) => {
+                    const newId = e.target.value;
+                    const found = cards.find((c) => c.id === newId);
+                    setPdfModalData({
+                      ...pdfModalData,
+                      selectedCardId: newId,
+                      detectedCardName: found ? found.name : pdfModalData.detectedCardName,
+                    });
+                  }}
+                  style={{ colorScheme: darkMode ? "dark" : "light" }}
+                  className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs font-semibold cursor-pointer transition hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
+                >
+                  {cards.map((c) => (
+                    <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                      {c.name} (Limite: {formatBRL(c.limit)})
+                    </option>
+                  ))}
+                  <option value="new" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                    + Criar / Usar cartão "{pdfModalData.detectedCardName}"
+                  </option>
+                </select>
+                <ChevronDown
+                  size={15}
+                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
+                />
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+                <span>Detalhes do consumo identificados ({pdfModalData.items.length}):</span>
+                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                  Total na fatura:{" "}
+                  {formatBRL(
+                    pdfModalData.items.reduce((acc, it) => acc + (Number(it.installmentValue) || 0), 0)
+                  )}
+                </span>
+              </div>
+
+              {pdfModalData.items.length === 0 ? (
+                <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-center text-xs text-slate-500">
+                  Nenhum detalhe de consumo pôde ser extraído automaticamente deste PDF.
+                </div>
+              ) : (
+                <div className="max-h-56 overflow-y-auto divide-y divide-slate-200 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl px-3">
+                  {pdfModalData.items.map((item) => (
+                    <div key={item.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-slate-900 dark:text-white truncate">
+                          {item.what}
+                        </p>
+                        <p className="text-[11px] text-slate-500 truncate">
+                          {item.where} • {item.category}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="font-bold text-amber-500 block">
+                          {item.totalInstallments > 1
+                            ? `Parcela ${item.currentInstallment}/${item.totalInstallments} de ${formatBRL(item.installmentValue)}`
+                            : `À vista ${formatBRL(item.installmentValue)}`}
+                        </span>
+                        {item.totalInstallments > 1 && (
+                          <span className="text-[10px] text-slate-400 block">
+                            Total da compra: {formatBRL(item.totalAmount)}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPdfModalData({
+                            ...pdfModalData,
+                            items: pdfModalData.items.filter((i) => i.id !== item.id),
+                          })
+                        }
+                        className="p-1 text-slate-400 hover:text-red-500 cursor-pointer"
+                        title="Remover este item da importação"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setPdfModalData(null)}
+                className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={pdfModalData.items.length === 0}
+                onClick={handleConfirmPdfImport}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+              >
+                <Check size={15} /> Confirmar
+              </button>
+            </div>
           </div>
         </div>
       )}
