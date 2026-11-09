@@ -1,1887 +1,2551 @@
-import React, { useState, useEffect } from "react";
-import { initializeApp } from "firebase/app";
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged,
-  updateProfile,
-  updatePassword,
-} from "firebase/auth";
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  collection,
-  getDocs,
-  deleteDoc,
-} from "firebase/firestore";
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Wallet,
   CreditCard,
   TrendingDown,
   Plus,
   Trash2,
-  Sun,
-  Moon,
-  ShieldAlert,
+  Edit2,
   LogOut,
-  Home,
-  ShoppingBag,
-  Layers,
-  Users,
-  Pencil,
+  Shield,
+  Eye,
+  Code,
   Check,
   X,
-  Code,
-  Eye,
-  Calendar,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
-  RotateCcw,
-  KeyRound,
-  CheckCircle2,
+  Home,
+  ShoppingBag,
+  Calendar,
   FileText,
+  Lock,
+  CheckSquare,
+  Square,
+  AlertCircle,
   Upload,
-  Loader2,
-} from "lucide-react";
+  Users,
+  UserCheck
+} from 'lucide-react';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCsQJYqDTk3jwd3ZD3IDvfWjprk-IoFXR4",
-  authDomain: "pro-finance-control.firebaseapp.com",
-  projectId: "pro-finance-control",
-  storageBucket: "pro-finance-control.firebasestorage.app",
-  messagingSenderId: "1049329594472",
-  appId: "1:1049329594472:web:8dad6bc3f5a343111e8bdd"
-};
+// ==========================================
+// UTILITÁRIOS DE MOEDA E CICLOS
+// ==========================================
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const googleProvider = new GoogleAuthProvider();
-const db = getFirestore(app);
-
-const SUPERADMIN_EMAILS = ["dumaster@teste.com", "admin@financas.com"];
-const SESSION_DURATION_MS = 10 * 60 * 1000;
-const SESSION_STORAGE_KEY = "pfc_login_timestamp";
-
-const maskCurrencyInput = (value) => {
-  if (!value) return "";
-  const digits = String(value).replace(/\D/g, "");
-  if (!digits) return "";
-  const numberVal = Number(digits) / 100;
-  return numberVal.toLocaleString("pt-BR", {
+// Formata enquanto o usuário digita: "254462" -> "2.544,62"
+const formatInputCurrency = (raw) => {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  const numberValue = parseInt(digits, 10) / 100;
+  return numberValue.toLocaleString('pt-BR', {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 2
   });
 };
 
-const parseMaskedCurrency = (value) => {
-  if (!value) return 0;
-  const clean = String(value).replace(/\./g, "").replace(",", ".");
-  const num = parseFloat(clean);
-  return isNaN(num) ? 0 : num;
+// Converte um número real (ex: 752.22) para string mascarada ("752,22") sem multiplicar por 100
+const numberToMaskedCurrency = (num) => {
+  const n = Number(num);
+  if (isNaN(n) || n <= 0) return '';
+  return n.toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
 };
 
+// Converte string mascarada ("2.544,62") para float (2544.62)
+const parseMaskedCurrency = (formattedValue) => {
+  if (typeof formattedValue === 'number') return formattedValue;
+  if (!formattedValue) return 0;
+  const str = String(formattedValue).trim().replace(/[R$\s]/g, '');
+  if (!str) return 0;
+  if (str.includes(',')) {
+    const clean = str.replace(/\./g, '').replace(',', '.');
+    const parsed = parseFloat(clean);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  const digits = str.replace(/\D/g, '');
+  if (!digits) return 0;
+  return parseInt(digits, 10) / 100;
+};
+
+// Formata float para exibição "R$ 2.544,62"
 const formatBRL = (value) => {
-  return Number(value || 0).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
+  const num = Number(value) || 0;
+  return num.toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
   });
 };
 
-const numberToMaskedCurrency = (value) => {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num === 0) return "";
-  return num.toLocaleString("pt-BR", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-};
-
-const toSafeInt = (val, fallback = 0) => {
-  const n = parseInt(val, 10);
-  return Number.isFinite(n) ? n : fallback;
-};
-
-const toSafeNumber = (val, fallback = 0) => {
-  const n = Number(val);
-  return Number.isFinite(n) ? n : fallback;
-};
-
-const clampDay = (val, fallback = 1) => {
-  const n = parseInt(val, 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(31, Math.max(1, n));
-};
-
-const isCardInvoiceClosedToday = (card) => {
-  if (!card || !card.closingDay) return false;
-  const todayDay = new Date().getDate();
-  const closingDay = clampDay(card.closingDay, 1);
-  return todayDay >= closingDay;
-};
-
-const loadPdfJsLibrary = async () => {
-  if (window.pdfjsLib) return window.pdfjsLib;
-  await new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    script.onload = resolve;
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-  return window.pdfjsLib;
-};
-
-const extractTextFromPdfFile = async (file) => {
-  const pdfjsLib = await loadPdfJsLibrary();
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  let fullText = "";
-
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
-    const strings = content.items.map((item) => item.str);
-    fullText += strings.join(" ") + "\n";
-  }
-  return fullText;
-};
-
-const guessCategoryFromText = (desc) => {
-  const lower = String(desc || "").toLowerCase();
-  if (/ifood|restaurante|lanch|burger|pizza|padaria|mercado|supermercado|atacad|carrefour|assai|acai|cafe|bar|doce/.test(lower)) {
-    return "Alimentação";
-  }
-  if (/uber|99|posto|gasolina|combustivel|estacionamento|pedagio|onibus|metro|passagem|latam|gol|azul/.test(lower)) {
-    return "Transporte";
-  }
-  if (/farmacia|droga|hospital|clinica|medico|exame|drogasil|pague menos|raia/.test(lower)) {
-    return "Saúde";
-  }
-  if (/netflix|spotify|steam|cinema|ingresso|playstation|xbox|nintendo|jogo|prime|disney|hbo/.test(lower)) {
-    return "Lazer";
-  }
-  if (/curso|faculdade|escola|livro|udemy|alura|educa/.test(lower)) {
-    return "Educação";
-  }
-  return "Compras";
-};
-
-const parseInvoiceTextFallback = (rawText, fileName, userCards) => {
-  const combinedSource = `${fileName || ""}\n${rawText || ""}`;
-  let detectedCardName = "";
-
-  for (const c of userCards || []) {
-    if (c.name && new RegExp(c.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(combinedSource)) {
-      detectedCardName = c.name;
-      break;
-    }
-  }
-
-  if (!detectedCardName) {
-    const knownBanks = [
-      { regex: /nubank|nu pagamentos/i, name: "Nubank" },
-      { regex: /mercado\s*pago/i, name: "Mercado Pago" },
-      { regex: /inter|banco inter/i, name: "Inter" },
-      { regex: /ita[uú]|itaucard/i, name: "Itaú" },
-      { regex: /bradesco/i, name: "Bradesco" },
-      { regex: /santander/i, name: "Santander" },
-      { regex: /c6\s*bank|banco c6/i, name: "C6 Bank" },
-      { regex: /picpay/i, name: "PicPay" },
-      { regex: /caixa/i, name: "Caixa" },
-      { regex: /banco do brasil|ourocard/i, name: "Banco do Brasil" },
-      { regex: /xp\s*investimentos|cartao xp/i, name: "XP" },
-    ];
-    for (const bank of knownBanks) {
-      if (bank.regex.test(combinedSource)) {
-        detectedCardName = bank.name;
-        break;
-      }
-    }
-  }
-
-  if (!detectedCardName) {
-    detectedCardName = userCards?.[0]?.name || "Cartão de Crédito";
-  }
-
-  const ignoreRegex =
-    /pagamento\s*(recebido|fatura|efetuado|minimo|total)|total\s*da\s*fatura|saldo\s*anterior|limite\s*(total|disponivel)|encargos|resumo\s*da\s*fatura|fatura\s*anterior|credito\s*em\s*confianca|estorno/i;
-
-  const normalized = String(rawText || "")
-    .replace(/\s+/g, " ")
-    .replace(/(\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+[A-ZÇÃÕÁÉÍÓÚ]{3})/gi, "\n$1");
-
-  const lines = normalized.split("\n");
-  const items = [];
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || ignoreRegex.test(line)) continue;
-
-    const match = line.match(
-      /^(?:\d{2}\/\d{2}(?:\/\d{2,4})?|\d{1,2}\s+[A-ZÇÃÕÁÉÍÓÚ]{3})\s+(.+?)\s+(?:R\$\s*)?(-?\d{1,3}(?:\.\d{3})*,\d{2})\b/i
-    );
-    if (!match) continue;
-
-    let desc = match[1].trim();
-    const amountStr = match[2];
-    if (amountStr.startsWith("-") || ignoreRegex.test(desc)) continue;
-
-    const installmentValue = parseMaskedCurrency(amountStr);
-    if (installmentValue <= 0 || installmentValue > 200000) continue;
-
-    let currentInstallment = 1;
-    let totalInstallments = 1;
-
-    const instMatch =
-      desc.match(/(?:parcela\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i) ||
-      line.match(/(?:parcela\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i);
-
-    if (instMatch) {
-      const cur = parseInt(instMatch[1], 10);
-      const tot = parseInt(instMatch[2], 10);
-      if (cur >= 1 && tot >= cur && tot <= 48) {
-        currentInstallment = cur;
-        totalInstallments = tot;
-        desc = desc.replace(instMatch[0], "").trim();
-      }
-    }
-
-    desc = desc.replace(/[-–•*]+$/g, "").replace(/\s{2,}/g, " ").trim();
-    if (!desc || desc.length < 2) continue;
-
-    let what = desc;
-    let where = desc;
-    if (desc.includes("*")) {
-      const parts = desc.split("*").map((s) => s.trim()).filter(Boolean);
-      if (parts.length >= 2) {
-        where = parts[0];
-        what = parts.slice(1).join(" - ");
-      }
-    } else if (desc.includes(" - ")) {
-      const parts = desc.split(" - ").map((s) => s.trim()).filter(Boolean);
-      if (parts.length >= 2) {
-        where = parts[0];
-        what = parts.slice(1).join(" - ");
-      }
-    }
-
-    items.push({
-      id: `${Date.now()}-${ items.length}`,
-      what: what.slice(0, 60),
-      where: where.slice(0, 50),
-      installmentValue,
-      currentInstallment,
-      totalInstallments,
-      totalAmount: Number((installmentValue * totalInstallments).toFixed(2)),
-      category: guessCategoryFromText(desc),
-    });
-  }
-
-  return { detectedCardName, items };
-};
-
+// Garante que o índice de ciclo seja sempre um número inteiro válido (evita NaN)
 const sanitizeCycle = (val) => {
-  if (typeof val === "number" && Number.isFinite(val) && Math.abs(val) < 500) {
-    return Math.trunc(val);
-  }
-  if (typeof val === "string" && /^-?\d+$/.test(val.trim())) {
-    const n = parseInt(val.trim(), 10);
-    if (Number.isFinite(n) && Math.abs(n) < 500) return n;
-  }
+  if (typeof val === 'number' && !isNaN(val)) return Math.trunc(val);
   return 0;
 };
 
-// Agrupa compras no cartão de crédito feitas no mesmo lugar, mesmo cartão, mesmas parcelas e mesmo ciclo em uma única compra
-const consolidateCardExpenses = (list) => {
-  const chronological = [...(list || [])].reverse();
-  const grouped = [];
-
-  for (const exp of chronological) {
-    const isCredit =
-      exp.paymentMethod === "credito" ||
-      String(exp.paymentLabel || "").startsWith("Cartão:");
-
-    if (isCredit) {
-      const normWhere = String(exp.where || "").trim().toLowerCase();
-      const normSource = String(exp.paymentSource || "");
-      const normInst = Math.max(1, toSafeInt(exp.installments, 1));
-      const normCycle = sanitizeCycle(exp.startCycle);
-
-      const existingIndex = grouped.findIndex((item) => {
-        const itemIsCredit =
-          item.paymentMethod === "credito" ||
-          String(item.paymentLabel || "").startsWith("Cartão:");
-        return (
-          itemIsCredit &&
-          String(item.where || "").trim().toLowerCase() === normWhere &&
-          String(item.paymentSource || "") === normSource &&
-          Math.max(1, toSafeInt(item.installments, 1)) === normInst &&
-          sanitizeCycle(item.startCycle) === normCycle
-        );
-      });
-
-      if (existingIndex !== -1) {
-        const existing = grouped[existingIndex];
-        const existingItems = String(existing.what || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const newItems = String(exp.what || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-
-        for (const ni of newItems) {
-          if (!existingItems.some((ei) => ei.toLowerCase() === ni.toLowerCase())) {
-            existingItems.push(ni);
-          }
-        }
-
-        grouped[existingIndex] = {
-          ...existing,
-          what: existingItems.join(", "),
-        };
-        continue;
-      }
-    }
-
-    grouped.push(exp);
-  }
-
-  return grouped.reverse();
+// Gera o nome do mês/ano conforme o deslocamento de ciclos a partir da data base
+const getCycleLabel = (cycleOffset) => {
+  const baseDate = new Date();
+  const target = new Date(baseDate.getFullYear(), baseDate.getMonth() + sanitizeCycle(cycleOffset), 1);
+  const label = target.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+  return label.charAt(0).toUpperCase() + label.slice(1);
 };
 
+const DEFAULT_CATEGORIES = [
+  'Alimentação',
+  'Compras',
+  'Transporte',
+  'Moradia',
+  'Lazer',
+  'Saúde',
+  'Educação',
+  'Assinaturas',
+  'Outros'
+];
+
 export default function App() {
-  const [darkMode, setDarkMode] = useState(true);
-  const [user, setUser] = useState(null);
-  const [loadingAuth, setLoadingAuth] = useState(true);
-
-  const [viewMode, setViewMode] = useState("preview");
-
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [nameInput, setNameInput] = useState("");
-  const [emailInput, setEmailInput] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [authSuccess, setAuthSuccess] = useState("");
-
-  const [activeView, setActiveView] = useState("dashboard");
-  const [showOnlyActiveInCycle, setShowOnlyActiveInCycle] = useState(false);
-
-  const [salary, setSalary] = useState(0);
-  const [fixedExpenses, setFixedExpenses] = useState([]);
-  const [cards, setCards] = useState([]);
-  const [expenses, setExpenses] = useState([]);
-  const [currentCycle, setCurrentCycle] = useState(0);
-
-  const [showPasswordModal, setShowPasswordModal] = useState(false);
-  const [newPasswordInput, setNewPasswordInput] = useState("");
-  const [passwordFeedback, setPasswordFeedback] = useState("");
-
-  const [isEditingSalary, setIsEditingSalary] = useState(false);
-  const [salaryInput, setSalaryInput] = useState("");
-
-  const [isEditingCards, setIsEditingCards] = useState(false);
-
-  const [fixedName, setFixedName] = useState("");
-  const [fixedAmount, setFixedAmount] = useState("");
-  const [editingFixedId, setEditingFixedId] = useState(null);
-  const [editFixedName, setEditFixedName] = useState("");
-  const [editFixedAmount, setEditFixedAmount] = useState("");
-
-  const [cardName, setCardName] = useState("");
-  const [cardLimit, setCardLimit] = useState("");
-  const [cardClosingDay, setCardClosingDay] = useState("1");
-  const [cardDueDay, setCardDueDay] = useState("10");
-  const [selectedCardIdForDetails, setSelectedCardIdForDetails] = useState("");
-  const [editingCardId, setEditingCardId] = useState(null);
-  const [editCardName, setEditCardName] = useState("");
-  const [editCardLimit, setEditCardLimit] = useState("");
-  const [editCardClosingDay, setEditCardClosingDay] = useState("1");
-  const [editCardDueDay, setEditCardDueDay] = useState("10");
-
-  const [expWhat, setExpWhat] = useState("");
-  const [expWhere, setExpWhere] = useState("");
-  const [expAmount, setExpAmount] = useState("");
-  const [isMultiplePurchase, setIsMultiplePurchase] = useState(false);
-  const [extraPurchaseItems, setExtraPurchaseItems] = useState([]);
-  const [extraItemInput, setExtraItemInput] = useState("");
-  const [expCategory, setExpCategory] = useState("Alimentação");
-  const [isAddingCategory, setIsAddingCategory] = useState(false);
-  const [newCategoryInput, setNewCategoryInput] = useState("");
-  const [customCategories, setCustomCategories] = useState(["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"]);
-  const [expPaymentMethod, setExpPaymentMethod] = useState("pix");
-  const [expCreditCardId, setExpCreditCardId] = useState("");
-  const [expInstallments, setExpInstallments] = useState(1);
-
-  const [editingExpId, setEditingExpId] = useState(null);
-  const [editExpWhat, setEditExpWhat] = useState("");
-  const [editExpWhere, setEditExpWhere] = useState("");
-  const [editExpAmount, setEditExpAmount] = useState("");
-  const [editExpCategory, setEditExpCategory] = useState("Alimentação");
-  const [editExpPaymentMethod, setEditExpPaymentMethod] = useState("pix");
-  const [editExpCreditCardId, setEditExpCreditCardId] = useState("");
-  const [editExpInstallments, setEditExpInstallments] = useState(1);
-
-  const [isReadingPdf, setIsReadingPdf] = useState(false);
-  const [pdfModalData, setPdfModalData] = useState(null);
-  const [pdfFeedbackError, setPdfFeedbackError] = useState("");
-  const pdfFileInputRef = React.useRef(null);
-
-  const [allUsers, setAllUsers] = useState([]);
-
+  // ==========================================
+  // FAVICON DE CARTEIRA NA ABA DO NAVEGADOR
+  // ==========================================
   useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-  }, [darkMode]);
-
-  useEffect(() => {
-    document.title = "Controle Financeiro";
-    const walletSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2310b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>`;
+    const svgFavicon = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="5" width="20" height="14" rx="2" fill="#064e3b"/>
+        <path d="M16 12h.01" stroke="#34d399" stroke-width="3"/>
+        <path d="M2 10h20" stroke="#10b981"/>
+      </svg>
+    `.trim();
+    const encoded = `data:image/svg+xml;utf8,${encodeURIComponent(svgFavicon)}`;
     let link = document.querySelector("link[rel~='icon']");
     if (!link) {
-      link = document.createElement("link");
-      link.rel = "icon";
+      link = document.createElement('link');
+      link.rel = 'icon';
       document.head.appendChild(link);
     }
-    link.type = "image/svg+xml";
-    link.href = `data:image/svg+xml,${walletSvg}`;
+    link.href = encoded;
+    document.title = 'Controle Financeiro';
   }, []);
+
+  // ==========================================
+  // ESTADOS DE AUTENTICAÇÃO E USUÁRIOS
+  // ==========================================
+  const [usersDb, setUsersDb] = useState(() => {
+    const defaultUsers = {
+      'dumaster@teste.com': {
+        email: 'dumaster@teste.com',
+        name: 'SuperAdmin',
+        password: 'admin',
+        role: 'superadmin'
+      },
+      'andreydutraa@gmail.com': {
+        email: 'andreydutraa@gmail.com',
+        name: 'Andrey Dutra',
+        password: '123456',
+        role: 'user'
+      }
+    };
+    try {
+      const saved = localStorage.getItem('cf_users_db_v5');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return { ...defaultUsers, ...parsed };
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return defaultUsers;
+  });
+
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('cf_current_user_v5');
+      if (saved) return JSON.parse(saved);
+      // Recupera sessão anterior caso exista em chaves antigas do navegador
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.includes('user') && k !== 'cf_users_db_v5') {
+          try {
+            const val = JSON.parse(localStorage.getItem(k));
+            if (val && val.email && val.name) return val;
+          } catch (_) {}
+        }
+      }
+    } catch (e) {
+      return null;
+    }
+    return null;
+  });
+
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+  const [showGooglePicker, setShowGooglePicker] = useState(false);
+
+  // Modal de configurar/alterar senha para entrar direto sem pop-up do Google
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [newDirectPassword, setNewDirectPassword] = useState('');
+  const [confirmDirectPassword, setConfirmDirectPassword] = useState('');
+  const [passwordModalMessage, setPasswordModalMessage] = useState({ type: '', text: '' });
+
+  // Seletor Prévia / Código e Painel de Usuários (exclusivo para superadmin)
+  const [viewMode, setViewMode] = useState('preview'); // 'preview' | 'admin' | 'code'
+
+  // Estados Financeiros Principais
+  const [salary, setSalary] = useState(2544.62);
+  const [salaryInput, setSalaryInput] = useState('2.544,62');
+  const [isEditingSalary, setIsEditingSalary] = useState(false);
+  const [currentCycle, setCurrentCycle] = useState(0);
+
+  // Estados dos Cartões de Crédito
+  const [cards, setCards] = useState([
+    { id: 'card-1', name: 'Nubank', limit: 5200.0, closingDay: 1, dueDay: 10 },
+    { id: 'card-2', name: 'Mercado Pago', limit: 11570.92, closingDay: 5, dueDay: 15 },
+    { id: 'card-3', name: 'Itau', limit: 14870.99, closingDay: 10, dueDay: 20 }
+  ]);
+  const [selectedCardId, setSelectedCardId] = useState('card-1');
+  const [isEditingCards, setIsEditingCards] = useState(false);
+  const [newCardName, setNewCardName] = useState('');
+  const [newCardLimit, setNewCardLimit] = useState('');
+  const [newCardClosingDay, setNewCardClosingDay] = useState('1');
+  const [newCardDueDay, setNewCardDueDay] = useState('10');
+  const [editingCardId, setEditingCardId] = useState(null);
+
+  const [customCategories, setCustomCategories] = useState([]);
+  const [showCategoryCreator, setShowCategoryCreator] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  const [fixedExpenses, setFixedExpenses] = useState([
+    { id: 'fix-1', name: 'Aluguel', amount: 1200.0 },
+    { id: 'fix-2', name: 'Academia', amount: 75.0 },
+    { id: 'fix-3', name: 'Conta de Luz', amount: 160.0 }
+  ]);
+  const [fixedNameInput, setFixedNameInput] = useState('');
+  const [fixedAmountInput, setFixedAmountInput] = useState('');
+  const [editingFixedId, setEditingFixedId] = useState(null);
+
+  const [expenses, setExpenses] = useState([
+    {
+      id: 'exp-1',
+      what: 'Doce',
+      where: 'Andrade',
+      amount: 20.0,
+      category: 'Alimentação',
+      paymentMethod: 'credit',
+      cardId: 'card-2',
+      installments: 2,
+      startCycle: 0
+    },
+    {
+      id: 'exp-2',
+      what: 'GTA 6',
+      where: 'Steam',
+      amount: 659.99,
+      category: 'Compras',
+      paymentMethod: 'credit',
+      cardId: 'card-1',
+      installments: 10,
+      startCycle: 0
+    }
+  ]);
+
+  // Estados do formulário "Registrar Novo Gasto"
+  const [expWhat, setExpWhat] = useState('');
+  const [isMultiPurchase, setIsMultiPurchase] = useState(false);
+  const [multiItemsText, setMultiItemsText] = useState('');
+  const [expWhere, setExpWhere] = useState('');
+  const [expAmount, setExpAmount] = useState('');
+  const [expCategory, setExpCategory] = useState('Alimentação');
+  const [expPaymentMethod, setExpPaymentMethod] = useState('pix'); // 'pix' | 'debit' | 'credit'
+  const [expCardId, setExpCardId] = useState('card-1');
+  const [expInstallments, setExpInstallments] = useState(1);
+
+  // Modal de Edição de Gasto (Card bonito)
+  const [editingExpense, setEditingExpense] = useState(null);
+  const [editExpWhat, setEditExpWhat] = useState('');
+  const [editExpWhere, setEditExpWhere] = useState('');
+  const [editExpAmount, setEditExpAmount] = useState('');
+  const [editExpCategory, setEditExpCategory] = useState('Alimentação');
+  const [editExpPaymentMethod, setEditExpPaymentMethod] = useState('pix');
+  const [editExpCardId, setEditExpCardId] = useState('');
+  const [editExpInstallments, setEditExpInstallments] = useState(1);
+
+  // Leitor de Fatura PDF
+  const pdfInputRef = useRef(null);
+  const [isReadingPdf, setIsReadingPdf] = useState(false);
+  const [pdfConfirmModal, setPdfConfirmModal] = useState(null);
+
+  // ==========================================
+  // PERSISTÊNCIA POR USUÁRIO NO LOCALSTORAGE
+  // ==========================================
+  useEffect(() => {
+    try {
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(usersDb));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [usersDb]);
 
   useEffect(() => {
-    let logoutTimer = null;
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      const loginTimestamp = localStorage.getItem(SESSION_STORAGE_KEY);
-      const now = Date.now();
-
-      if (currentUser && loginTimestamp) {
-        const elapsed = now - Number(loginTimestamp);
-        if (elapsed < SESSION_DURATION_MS) {
-          await loadOrCreateUserData(currentUser);
-          const remainingTime = SESSION_DURATION_MS - elapsed;
-          if (logoutTimer) clearTimeout(logoutTimer);
-          logoutTimer = setTimeout(async () => {
-            localStorage.removeItem(SESSION_STORAGE_KEY);
-            await signOut(auth);
-            setUser(null);
-          }, remainingTime);
-        } else {
-          localStorage.removeItem(SESSION_STORAGE_KEY);
-          await signOut(auth);
-          setUser(null);
-        }
-      } else {
-        if (currentUser) await signOut(auth);
-        localStorage.removeItem(SESSION_STORAGE_KEY);
-        setUser(null);
-      }
-      setLoadingAuth(false);
-    });
-    return () => {
-      if (logoutTimer) clearTimeout(logoutTimer);
-      unsubscribe();
-    };
-  }, []);
-
-  const loadOrCreateUserData = async (firebaseUser) => {
-    const userRef = doc(db, "users", firebaseUser.uid);
-    const snap = await getDoc(userRef);
-    const isSuperAdmin = SUPERADMIN_EMAILS.includes(firebaseUser.email);
-
-    if (snap.exists()) {
-      const data = snap.data();
-      const loadedSalary = Number(data.salary || 0);
-      setUser({
-        uid: firebaseUser.uid,
-        name: data.name || firebaseUser.displayName || "Usuário",
-        email: firebaseUser.email,
-        role: isSuperAdmin ? "superadmin" : data.role || "user",
-      });
-      setSalary(loadedSalary);
-      setSalaryInput(numberToMaskedCurrency(loadedSalary));
-      setFixedExpenses(data.fixedExpenses || []);
-      if (Array.isArray(data.customCategories) && data.customCategories.length > 0) {
-        setCustomCategories(data.customCategories);
-      }
-      const loadedCards = data.cards || [];
-      setCards(loadedCards);
-      if (loadedCards.length > 0 && !selectedCardIdForDetails) {
-        setSelectedCardIdForDetails(loadedCards[0].id);
-      }
-      const validCycle = sanitizeCycle(data.currentCycle);
-      const cleanedExpenses = (data.expenses || []).map((exp) => {
-        const inst = Math.max(1, toSafeInt(exp.installments, 1));
-        const rawTotal = toSafeNumber(exp.totalAmount ?? exp.amount, 0);
-        const rawInstVal = toSafeNumber(exp.installmentValue, 0);
-        const totalAmount = rawTotal > 0 ? rawTotal : rawInstVal * inst;
-        const installmentValue = rawInstVal > 0 ? rawInstVal : totalAmount / inst;
-        return {
-          ...exp,
-          installments: inst,
-          totalAmount,
-          installmentValue,
-          startCycle: sanitizeCycle(exp.startCycle),
-        };
-      });
-      setExpenses(cleanedExpenses);
-      setCurrentCycle(validCycle);
-      if (data.currentCycle !== validCycle) {
-        await setDoc(userRef, { currentCycle: validCycle }, { merge: true });
-      }
-    } else {
-      const initialData = {
-        name: firebaseUser.displayName || nameInput || "Usuário",
-        email: firebaseUser.email,
-        role: isSuperAdmin ? "superadmin" : "user",
-        salary: 0,
-        fixedExpenses: [],
-        customCategories: ["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"],
-        cards: [],
-        expenses: [],
-        currentCycle: 0,
-        createdAt: new Date().toISOString(),
-      };
-      await setDoc(userRef, initialData);
-      setUser({ uid: firebaseUser.uid, ...initialData });
-      setSalary(0);
-      setSalaryInput("");
-      setFixedExpenses([]);
-      setCustomCategories(initialData.customCategories);
-      setCards([]);
-      setExpenses([]);
-      setCurrentCycle(0);
-    }
-  };
-
-  const saveUserData = async (updatedFields) => {
-    if (!user) return;
-    const userRef = doc(db, "users", user.uid);
-    await setDoc(userRef, updatedFields, { merge: true });
-  };
-
-  const handleGoogleLogin = async () => {
-    setAuthError("");
     try {
-      localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
-      const cred = await signInWithPopup(auth, googleProvider);
-      if (isRegistering && passwordInput && passwordInput.length >= 6) {
-        try {
-          await updatePassword(cred.user, passwordInput);
-        } catch (pwdErr) {
-          console.warn("Aviso ao vincular senha inicial:", pwdErr);
-        }
-      }
-    } catch (err) {
-      localStorage.removeItem(SESSION_STORAGE_KEY);
-      setAuthError("Erro ao autenticar com o Google: " + err.message);
-    }
-  };
+      if (currentUser) {
+        localStorage.setItem('cf_current_user_v5', JSON.stringify(currentUser));
+        const key = `cf_data_v5_${currentUser.email}`;
+        let saved = localStorage.getItem(key);
 
-  const handleLinkPassword = async (e) => {
-    e.preventDefault();
-    setPasswordFeedback("");
-    if (!newPasswordInput || newPasswordInput.length < 6) {
-      setPasswordFeedback("A senha deve ter pelo menos 6 caracteres.");
-      return;
-    }
-    try {
-      if (auth.currentUser) {
-        await updatePassword(auth.currentUser, newPasswordInput);
-        setPasswordFeedback("Senha vinculada com sucesso! Agora você pode entrar com E-mail e Senha.");
-        setNewPasswordInput("");
-        setTimeout(() => {
-          setShowPasswordModal(false);
-          setPasswordFeedback("");
-        }, 2000);
-      }
-    } catch (err) {
-      setPasswordFeedback("Para definir a senha, saia e entre novamente com o Google para renovar a sessão.");
-    }
-  };
-
-  const handleChangeCycle = async (newCycle) => {
-    const validCycle = sanitizeCycle(newCycle);
-    setCurrentCycle(validCycle);
-    await saveUserData({ currentCycle: validCycle });
-  };
-
-  const getCycleLabel = (offset) => {
-    const validOffset = sanitizeCycle(offset);
-    const d = new Date();
-    d.setMonth(d.getMonth() + validOffset);
-    const str = d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
-    return str.charAt(0).toUpperCase() + str.slice(1);
-  };
-
-  const getExpenseCycleStatus = (exp, cycle) => {
-    const totalInst = Math.max(1, toSafeInt(exp.installments, 1));
-    const rawTotal = toSafeNumber(exp.totalAmount ?? exp.amount, 0);
-    const rawInstVal = toSafeNumber(exp.installmentValue, 0);
-    const totalVal = rawTotal > 0 ? rawTotal : rawInstVal * totalInst;
-    const instVal = rawInstVal > 0 ? rawInstVal : totalVal / totalInst;
-    const start = sanitizeCycle(exp.startCycle);
-    const current = sanitizeCycle(cycle);
-    const elapsed = current - start;
-
-    if (elapsed < 0) {
-      return {
-        status: "future",
-        currentInstallment: 0,
-        totalInstallments: totalInst,
-        remainingInstallments: totalInst,
-        monthlyCharge: 0,
-        remainingAmount: totalVal,
-      };
-    }
-
-    if (elapsed >= totalInst) {
-      return {
-        status: elapsed === totalInst ? "paid" : "archived",
-        currentInstallment: totalInst,
-        totalInstallments: totalInst,
-        remainingInstallments: 0,
-        monthlyCharge: 0,
-        remainingAmount: 0,
-      };
-    }
-
-    const currentInst = elapsed + 1;
-    const remainingInst = totalInst - elapsed;
-    const remainingAmt = Math.max(0, totalVal - elapsed * instVal);
-
-    return {
-      status: "active",
-      currentInstallment: currentInst,
-      totalInstallments: totalInst,
-      remainingInstallments: remainingInst,
-      monthlyCharge: instVal,
-      remainingAmount: remainingAmt,
-    };
-  };
-
-  const handleEmailAuth = async (e) => {
-    e.preventDefault();
-    setAuthError("");
-    setAuthSuccess("");
-    try {
-      localStorage.setItem(SESSION_STORAGE_KEY, Date.now().toString());
-      if (isRegistering) {
-        const cred = await createUserWithEmailAndPassword(auth, emailInput, passwordInput);
-        if (nameInput) await updateProfile(cred.user, { displayName: nameInput });
-        await loadOrCreateUserData(cred.user);
-      } else {
-        await signInWithEmailAndPassword(auth, emailInput, passwordInput);
-      }
-    } catch (err) {
-      localStorage.removeItem(SESSION_STORAGE_KEY);
-      setAuthError("Falha na autenticação: " + err.message);
-    }
-  };
-
-  const handleLogout = async () => {
-    localStorage.removeItem(SESSION_STORAGE_KEY);
-    await signOut(auth);
-    setUser(null);
-  };
-
-  const handleSaveSalary = async (e) => {
-    if (e) e.preventDefault();
-    const num = parseMaskedCurrency(salaryInput);
-    setSalary(num);
-    setIsEditingSalary(false);
-    await saveUserData({ salary: num });
-  };
-
-  const handleAddFixed = async (e) => {
-    e.preventDefault();
-    if (!fixedName.trim() || fixedAmount === "") return;
-    const parsedAmount = parseMaskedCurrency(fixedAmount);
-    const updated = [
-      ...fixedExpenses,
-      { id: Date.now().toString(), name: fixedName.trim(), amount: parsedAmount },
-    ];
-    setFixedExpenses(updated);
-    setFixedName("");
-    setFixedAmount("");
-    await saveUserData({ fixedExpenses: updated });
-  };
-
-  const startEditFixed = (item) => {
-    setEditingFixedId(item.id);
-    setEditFixedName(item.name);
-    setEditFixedAmount(numberToMaskedCurrency(item.amount));
-  };
-
-  const handleSaveFixedEdit = async (id) => {
-    if (!editFixedName.trim()) return;
-    const parsedAmount = parseMaskedCurrency(editFixedAmount);
-    const updated = fixedExpenses.map((item) =>
-      item.id === id ? { ...item, name: editFixedName.trim(), amount: parsedAmount } : item
-    );
-    setFixedExpenses(updated);
-    setEditingFixedId(null);
-    await saveUserData({ fixedExpenses: updated });
-  };
-
-  const handleRemoveFixed = async (id) => {
-    const updated = fixedExpenses.filter((item) => item.id !== id);
-    setFixedExpenses(updated);
-    await saveUserData({ fixedExpenses: updated });
-  };
-
-  const handleAddCard = async (e) => {
-    e.preventDefault();
-    if (!cardName.trim() || cardLimit === "") return;
-    const parsedLimit = parseMaskedCurrency(cardLimit);
-    const newCard = {
-      id: Date.now().toString(),
-      name: cardName.trim(),
-      limit: parsedLimit,
-      closingDay: clampDay(cardClosingDay, 1),
-      dueDay: clampDay(cardDueDay, 10),
-    };
-    const updated = [...cards, newCard];
-    setCards(updated);
-    if (!selectedCardIdForDetails) {
-      setSelectedCardIdForDetails(newCard.id);
-    }
-    setCardName("");
-    setCardLimit("");
-    setCardClosingDay("1");
-    setCardDueDay("10");
-    await saveUserData({ cards: updated });
-  };
-
-  const startEditCard = (card) => {
-    setEditingCardId(card.id);
-    setEditCardName(card.name);
-    setEditCardLimit(numberToMaskedCurrency(card.limit));
-    setEditCardClosingDay(String(card.closingDay || 1));
-    setEditCardDueDay(String(card.dueDay || 10));
-  };
-
-  const handleSaveCardEdit = async (id) => {
-    if (!editCardName.trim()) return;
-    const newName = editCardName.trim();
-    const parsedLimit = parseMaskedCurrency(editCardLimit);
-    const closing = clampDay(editCardClosingDay, 1);
-    const due = clampDay(editCardDueDay, 10);
-    const updatedCards = cards.map((c) =>
-      c.id === id
-        ? { ...c, name: newName, limit: parsedLimit, closingDay: closing, dueDay: due }
-        : c
-    );
-    const updatedExpenses = expenses.map((exp) => (exp.paymentSource === id ? { ...exp, paymentLabel: `Cartão: ${newName}` } : exp));
-    setCards(updatedCards);
-    setExpenses(updatedExpenses);
-    setEditingCardId(null);
-    await saveUserData({ cards: updatedCards, expenses: updatedExpenses });
-  };
-
-  const handleRemoveCard = async (id) => {
-    const updated = cards.filter((c) => c.id !== id);
-    setCards(updated);
-    if (selectedCardIdForDetails === id) {
-      setSelectedCardIdForDetails(updated.length > 0 ? updated[0].id : "");
-    }
-    await saveUserData({ cards: updated });
-  };
-
-  const handleCreateCategory = async (e) => {
-    if (e) e.preventDefault();
-    const trimmed = newCategoryInput.trim();
-    if (!trimmed) return;
-    const exists = customCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase());
-    const updatedCategories = exists ? customCategories : [...customCategories, trimmed];
-    setCustomCategories(updatedCategories);
-    setExpCategory(trimmed);
-    setNewCategoryInput("");
-    setIsAddingCategory(false);
-    await saveUserData({ customCategories: updatedCategories });
-  };
-
-  const handleAddExtraItem = () => {
-    const trimmed = extraItemInput.trim();
-    if (!trimmed) return;
-    if (!extraPurchaseItems.some((i) => i.toLowerCase() === trimmed.toLowerCase())) {
-      setExtraPurchaseItems([...extraPurchaseItems, trimmed]);
-    }
-    setExtraItemInput("");
-  };
-
-  const handleRemoveExtraItem = (idx) => {
-    setExtraPurchaseItems(extraPurchaseItems.filter((_, i) => i !== idx));
-  };
-
-  const handleAddExpense = async (e) => {
-    e.preventDefault();
-    if (!expWhat.trim() || !expWhere.trim()) return;
-
-    const finalCategory = expCategory || "Alimentação";
-    const cycleNow = sanitizeCycle(currentCycle);
-    const chosenCard =
-      expPaymentMethod === "credito"
-        ? cards.find((c) => c.id === expCreditCardId)
-        : null;
-    const targetStartCycle =
-      chosenCard && isCardInvoiceClosedToday(chosenCard)
-        ? cycleNow + 1
-        : cycleNow;
-
-    const allItemsList = [
-      expWhat.trim(),
-      ...(isMultiplePurchase ? extraPurchaseItems : []),
-      ...(isMultiplePurchase && extraItemInput.trim() ? [extraItemInput.trim()] : []),
-    ].filter(Boolean);
-    const combinedWhat = allItemsList.join(", ");
-
-    if (isMultiplePurchase && expPaymentMethod === "credito") {
-      const paymentSource = expCreditCardId || "credito";
-      const installments = Math.max(1, Number(expInstallments) || 1);
-      const normWhere = expWhere.trim().toLowerCase();
-
-      const existingMatch = expenses.find((item) => {
-        const itemIsCredit =
-          item.paymentMethod === "credito" ||
-          String(item.paymentLabel || "").startsWith("Cartão:");
-        return (
-          itemIsCredit &&
-          String(item.where || "").trim().toLowerCase() === normWhere &&
-          String(item.paymentSource || "") === String(paymentSource) &&
-          Math.max(1, toSafeInt(item.installments, 1)) === installments &&
-          sanitizeCycle(item.startCycle) === targetStartCycle
-        );
-      });
-
-      if (existingMatch) {
-        const existingItems = String(existingMatch.what || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const newItems = combinedWhat
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-
-        for (const ni of newItems) {
-          if (!existingItems.some((ei) => ei.toLowerCase() === ni.toLowerCase())) {
-            existingItems.push(ni);
+        // Se ainda não houver na chave v5, procura dados anteriores salvos no navegador para não perder nada
+        if (!saved) {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.includes(currentUser.email) && k !== key) {
+              saved = localStorage.getItem(k);
+              if (saved) break;
+            }
           }
         }
 
-        const typedTotal = parseMaskedCurrency(expAmount);
-        const finalTotal =
-          existingMatch.totalAmount > 0 ? existingMatch.totalAmount : typedTotal;
-        const finalInstValue =
-          installments > 1 ? finalTotal / installments : finalTotal;
-
-        const updated = expenses.map((item) =>
-          item.id === existingMatch.id
-            ? {
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          const loadedSalary = Number(parsed.salary) || 0;
+          setSalary(loadedSalary);
+          setSalaryInput(numberToMaskedCurrency(loadedSalary));
+          setCurrentCycle(sanitizeCycle(parsed.currentCycle));
+          if (Array.isArray(parsed.cards) && parsed.cards.length > 0) {
+            setCards(parsed.cards);
+            setSelectedCardId(parsed.cards[0].id);
+            setExpCardId(parsed.cards[0].id);
+          }
+          if (Array.isArray(parsed.customCategories)) {
+            setCustomCategories(parsed.customCategories);
+          }
+          if (Array.isArray(parsed.fixedExpenses)) {
+            setFixedExpenses(parsed.fixedExpenses);
+          }
+          if (Array.isArray(parsed.expenses)) {
+            setExpenses(
+              parsed.expenses.map((item) => ({
                 ...item,
-                what: existingItems.join(", "),
-                totalAmount: finalTotal,
-                installmentValue: finalInstValue,
-              }
-            : item
-        );
+                amount: Number(item.amount) || 0,
+                installments: Math.max(1, parseInt(item.installments, 10) || 1),
+                startCycle: sanitizeCycle(item.startCycle)
+              }))
+            );
+          }
+        }
+      } else {
+        localStorage.removeItem('cf_current_user_v5');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, [currentUser]);
 
-        setExpenses(updated);
-        setExpWhat("");
-        setExpWhere("");
-        setExpAmount("");
-        setIsMultiplePurchase(false);
-        setExtraPurchaseItems([]);
-        setExtraItemInput("");
-        setExpPaymentMethod("pix");
-        setExpCreditCardId("");
+  useEffect(() => {
+    if (!currentUser) return;
+    try {
+      const key = `cf_data_v5_${currentUser.email}`;
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          salary,
+          currentCycle: sanitizeCycle(currentCycle),
+          cards,
+          customCategories,
+          fixedExpenses,
+          expenses
+        })
+      );
+    } catch (e) {
+      console.error(e);
+    }
+  }, [currentUser, salary, currentCycle, cards, customCategories, fixedExpenses, expenses]);
+
+  // Todas as categorias disponíveis (Padrão + Criadas pelo Usuário)
+  const allCategories = useMemo(() => {
+    const merged = [...DEFAULT_CATEGORIES];
+    customCategories.forEach((cat) => {
+      if (cat && !merged.includes(cat)) merged.push(cat);
+    });
+    return merged;
+  }, [customCategories]);
+
+  // Garante um cartão selecionado válido
+  useEffect(() => {
+    if (cards.length > 0 && !cards.some((c) => c.id === selectedCardId)) {
+      setSelectedCardId(cards[0].id);
+    }
+    if (cards.length > 0 && !cards.some((c) => c.id === expCardId)) {
+      setExpCardId(cards[0].id);
+    }
+  }, [cards, selectedCardId, expCardId]);
+
+  // ==========================================
+  // CÁLCULO DE CICLOS, PARCELAS E CARTÕES
+  // ==========================================
+  const processedExpenses = useMemo(() => {
+    const activeCycle = sanitizeCycle(currentCycle);
+
+    return expenses
+      .map((exp) => {
+        const totalAmount = Number(exp.amount) || 0;
+        const installments = Math.max(1, parseInt(exp.installments, 10) || 1);
+        const startCycle = sanitizeCycle(exp.startCycle);
+        const installmentValue = totalAmount / installments;
+
+        // Quantos meses se passaram desde o ciclo em que a compra iniciou
+        const elapsed = activeCycle - startCycle;
+
+        // Se estivermos visualizando um mês anterior ao início da fatura:
+        if (elapsed < 0) {
+          return {
+            ...exp,
+            installments,
+            installmentValue,
+            currentInstallmentNumber: 0,
+            status: 'scheduled', // Agendado para próxima fatura
+            monthlyCharge: 0,
+            remainingAmount: totalAmount,
+            visibleInHistory: true
+          };
+        }
+
+        // Enquanto estiver pagando as parcelas (Ex: elapsed = 0 -> 1ª parcela; elapsed = 1 -> 2ª parcela)
+        if (elapsed < installments) {
+          const currentInstallmentNumber = elapsed + 1;
+          const paidInstallmentsBeforeThisMonth = elapsed;
+          const remainingAmount = Math.max(
+            0,
+            totalAmount - paidInstallmentsBeforeThisMonth * installmentValue
+          );
+
+          return {
+            ...exp,
+            installments,
+            installmentValue,
+            currentInstallmentNumber,
+            status: 'active',
+            monthlyCharge: installmentValue,
+            remainingAmount,
+            visibleInHistory: true
+          };
+        }
+
+        // 1º mês imediatamente após quitar a última parcela: permanece visível como "Quitado"
+        if (elapsed === installments) {
+          return {
+            ...exp,
+            installments,
+            installmentValue,
+            currentInstallmentNumber: installments,
+            status: 'paid',
+            monthlyCharge: 0,
+            remainingAmount: 0,
+            visibleInHistory: true
+          };
+        }
+
+        // A partir do 2º mês após quitado: sai automaticamente do histórico
+        return {
+          ...exp,
+          installments,
+          installmentValue,
+          currentInstallmentNumber: installments,
+          status: 'archived',
+          monthlyCharge: 0,
+          remainingAmount: 0,
+          visibleInHistory: false
+        };
+      })
+      .filter((item) => item.visibleInHistory);
+  }, [expenses, currentCycle]);
+
+  // Totais gerais e por cartão de crédito no ciclo atual
+  const financialSummary = useMemo(() => {
+    const totalFixed = fixedExpenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0);
+
+    const monthlyInstallmentsTotal = processedExpenses.reduce(
+      (acc, exp) => acc + (exp.status === 'active' ? exp.monthlyCharge : 0),
+      0
+    );
+
+    const totalRemainingAccumulated = processedExpenses.reduce(
+      (acc, exp) => acc + (exp.remainingAmount || 0),
+      0
+    );
+
+    const totalCommittedMonth = totalFixed + monthlyInstallmentsTotal;
+    const freeBalance = (Number(salary) || 0) - totalCommittedMonth;
+
+    // Uso de limite por cartão de crédito (soma o valor restante das compras no cartão)
+    const cardUsageMap = {};
+    cards.forEach((c) => {
+      cardUsageMap[c.id] = 0;
+    });
+
+    processedExpenses.forEach((exp) => {
+      if (exp.paymentMethod === 'credit' && exp.cardId && cardUsageMap[exp.cardId] !== undefined) {
+        cardUsageMap[exp.cardId] += exp.remainingAmount || 0;
+      }
+    });
+
+    return {
+      totalFixed,
+      monthlyInstallmentsTotal,
+      totalRemainingAccumulated,
+      totalCommittedMonth,
+      freeBalance,
+      cardUsageMap
+    };
+  }, [fixedExpenses, processedExpenses, salary, cards]);
+
+  const selectedCard = useMemo(() => {
+    return cards.find((c) => c.id === selectedCardId) || cards[0] || null;
+  }, [cards, selectedCardId]);
+
+  // Verifica se hoje o cartão selecionado já fechou a fatura do mês
+  const isCardClosedToday = (card) => {
+    if (!card) return false;
+    const todayDay = new Date().getDate();
+    const closingDay = parseInt(card.closingDay, 10) || 1;
+    const dueDay = parseInt(card.dueDay, 10) || 10;
+    // Se fecha dia 1 e vence dia 10, qualquer compra do dia 1 em diante cai na fatura do mês seguinte
+    if (closingDay <= dueDay) {
+      return todayDay >= closingDay;
+    }
+    return todayDay >= closingDay;
+  };
+
+  // ==========================================
+  // HANDLERS DE AUTENTICAÇÃO
+  // ==========================================
+  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
+  const INACTIVITY_LIMIT_MS = 10 * 60 * 1000; // 10 minutos de inatividade para logout automático
+
+  // Monitora atividade do usuário e faz logout automático após 10 minutos sem uso
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let inactivityTimer;
+
+    const handleInactivityLogout = () => {
+      setCurrentUser(null);
+      setAuthError('Sessão encerrada automaticamente após 10 minutos de inatividade.');
+      try {
+        localStorage.removeItem('cf_current_user_v5');
+        localStorage.removeItem('cf_last_activity_v5');
+      } catch (_) {}
+    };
+
+    const resetInactivityTimer = () => {
+      try {
+        localStorage.setItem('cf_last_activity_v5', String(Date.now()));
+      } catch (_) {}
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(handleInactivityLogout, INACTIVITY_LIMIT_MS);
+    };
+
+    // Verifica se já passou de 10 minutos desde a última interação registrada
+    try {
+      const lastAct = Number(localStorage.getItem('cf_last_activity_v5') || 0);
+      if (lastAct > 0 && Date.now() - lastAct >= INACTIVITY_LIMIT_MS) {
+        handleInactivityLogout();
+        return;
+      }
+    } catch (_) {}
+
+    resetInactivityTimer();
+
+    const activityEvents = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'];
+    activityEvents.forEach((evt) => window.addEventListener(evt, resetInactivityTimer, { passive: true }));
+
+    return () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      activityEvents.forEach((evt) => window.removeEventListener(evt, resetInactivityTimer));
+    };
+  }, [currentUser]);
+
+  const getPasswordCooldownInfo = (userEmail) => {
+    if (!userEmail) return { isLocked: false, remainingDays: 0, unlockDateStr: '' };
+    const emailKey = userEmail.trim().toLowerCase();
+    const userRecord = usersDb[emailKey];
+    const lastChange = userRecord?.lastPasswordChange || currentUser?.lastPasswordChange || 0;
+    if (!lastChange) return { isLocked: false, remainingDays: 0, unlockDateStr: '' };
+
+    const elapsed = Date.now() - Number(lastChange);
+    if (elapsed >= ONE_MONTH_MS) {
+      return { isLocked: false, remainingDays: 0, unlockDateStr: '' };
+    }
+
+    const remainingMs = ONE_MONTH_MS - elapsed;
+    const remainingDays = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+    const unlockDate = new Date(Number(lastChange) + ONE_MONTH_MS);
+    const unlockDateStr = unlockDate.toLocaleDateString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    return { isLocked: true, remainingDays, unlockDateStr };
+  };
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    const emailClean = authEmail.trim().toLowerCase();
+    if (!emailClean || !authPassword) {
+      setAuthError('Preencha seu e-mail e senha.');
+      return;
+    }
+
+    // Conta SuperAdmin (dumaster@teste.com) sempre garantida no sistema
+    if (emailClean === 'dumaster@teste.com' || emailClean === 'dumaster') {
+      const adminEmail = 'dumaster@teste.com';
+      const existingAdmin = usersDb[adminEmail];
+
+      // Se o SuperAdmin já tiver trocado a senha pelo painel (lastPasswordChange ativo), valida a nova senha
+      if (
+        existingAdmin?.lastPasswordChange &&
+        existingAdmin?.password &&
+        authPassword !== existingAdmin.password
+      ) {
+        setAuthError('Senha incorreta para o SuperAdmin.');
+        return;
+      }
+
+      const superAdminUser = {
+        email: adminEmail,
+        name: existingAdmin?.name || 'SuperAdmin',
+        role: 'superadmin',
+        lastPasswordChange: existingAdmin?.lastPasswordChange || null
+      };
+
+      setUsersDb((prev) => {
+        const nextDb = {
+          ...prev,
+          [adminEmail]: {
+            ...superAdminUser,
+            password: authPassword
+          }
+        };
+        try {
+          localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+        } catch (_) {}
+        return nextDb;
+      });
+      setCurrentUser(superAdminUser);
+      return;
+    }
+
+    const existing = usersDb[emailClean];
+
+    if (!existing) {
+      setAuthError('Conta não encontrada. Cadastre-se ou entre com o Google.');
+      return;
+    }
+
+    // Se o usuário ainda estava com a senha padrão inicial e ainda não havia trocado, vincula a senha digitada
+    if (existing.lastPasswordChange && existing.password && existing.password !== authPassword) {
+      setAuthError('E-mail ou senha incorretos.');
+      return;
+    }
+
+    setUsersDb((prev) => {
+      const nextDb = {
+        ...prev,
+        [emailClean]: {
+          ...existing,
+          password: authPassword
+        }
+      };
+      try {
+        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+      } catch (_) {}
+      return nextDb;
+    });
+
+    setCurrentUser({
+      email: existing.email,
+      name: existing.name,
+      role: existing.role || 'user',
+      lastPasswordChange: existing.lastPasswordChange || null
+    });
+  };
+
+  const handleRegister = (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    const emailClean = authEmail.trim().toLowerCase();
+    if (!authName.trim() || !emailClean || !authPassword) {
+      setAuthError('Preencha nome, e-mail e senha para criar sua conta.');
+      return;
+    }
+
+    const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
+    const newUser = {
+      email: emailClean,
+      name: authName.trim(),
+      password: authPassword,
+      role,
+      lastPasswordChange: null
+    };
+
+    setUsersDb((prev) => {
+      const nextDb = { ...prev, [emailClean]: newUser };
+      try {
+        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+      } catch (_) {}
+      return nextDb;
+    });
+    setCurrentUser({
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role,
+      lastPasswordChange: null
+    });
+  };
+
+  const handleSelectGoogleAccount = (account) => {
+    const emailClean = account.email.toLowerCase();
+    const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
+    const existing = usersDb[emailClean];
+
+    const updatedUser = {
+      email: emailClean,
+      name: account.name || existing?.name || 'Usuário Google',
+      password: authPassword || existing?.password || '123456',
+      role,
+      lastPasswordChange: existing?.lastPasswordChange || null
+    };
+
+    setUsersDb((prev) => {
+      const nextDb = { ...prev, [emailClean]: updatedUser };
+      try {
+        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+      } catch (_) {}
+      return nextDb;
+    });
+    setShowGooglePicker(false);
+    setCurrentUser({
+      email: updatedUser.email,
+      name: updatedUser.name,
+      role: updatedUser.role,
+      lastPasswordChange: updatedUser.lastPasswordChange
+    });
+  };
+
+  const handleSaveDirectPassword = (e) => {
+    e.preventDefault();
+    setPasswordModalMessage({ type: '', text: '' });
+    if (!currentUser) return;
+
+    const emailKey = currentUser.email.trim().toLowerCase();
+    const cooldown = getPasswordCooldownInfo(emailKey);
+
+    if (cooldown.isLocked) {
+      setPasswordModalMessage({
+        type: 'error',
+        text: `Você já alterou sua senha recentemente. Nova alteração liberada em ${cooldown.remainingDays} dia(s) (${cooldown.unlockDateStr}).`
+      });
+      return;
+    }
+
+    const cleanPassword = newDirectPassword.trim();
+    if (cleanPassword.length < 4) {
+      setPasswordModalMessage({
+        type: 'error',
+        text: 'A nova senha deve ter pelo menos 4 caracteres.'
+      });
+      return;
+    }
+
+    if (confirmDirectPassword && cleanPassword !== confirmDirectPassword.trim()) {
+      setPasswordModalMessage({
+        type: 'error',
+        text: 'A confirmação de senha não confere.'
+      });
+      return;
+    }
+
+    const nowTimestamp = Date.now();
+    const existingRecord = usersDb[emailKey] || {
+      email: emailKey,
+      name: currentUser.name,
+      role: currentUser.role || 'user'
+    };
+
+    const updatedRecord = {
+      ...existingRecord,
+      email: emailKey,
+      password: cleanPassword,
+      lastPasswordChange: nowTimestamp
+    };
+
+    const nextUsersDb = {
+      ...usersDb,
+      [emailKey]: updatedRecord
+    };
+
+    const nextCurrentUser = {
+      ...currentUser,
+      email: emailKey,
+      lastPasswordChange: nowTimestamp
+    };
+
+    setUsersDb(nextUsersDb);
+    setCurrentUser(nextCurrentUser);
+
+    try {
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextUsersDb));
+      localStorage.setItem('cf_current_user_v5', JSON.stringify(nextCurrentUser));
+    } catch (err) {
+      console.error(err);
+    }
+
+    setNewDirectPassword('');
+    setConfirmDirectPassword('');
+    setPasswordModalMessage({
+      type: 'success',
+      text: 'Senha alterada e salva com sucesso! Próxima alteração disponível após 1 mês (30 dias).'
+    });
+  };
+
+  // ==========================================
+  // HANDLERS FINANCEIROS
+  // ==========================================
+  const handleSaveSalary = () => {
+    const parsed = parseMaskedCurrency(salaryInput);
+    setSalary(parsed);
+    setSalaryInput(numberToMaskedCurrency(parsed));
+    setIsEditingSalary(false);
+  };
+
+  const handleSaveCard = (e) => {
+    e.preventDefault();
+    if (!newCardName.trim()) return;
+    const limitVal = parseMaskedCurrency(newCardLimit);
+    const closeDay = Math.min(31, Math.max(1, parseInt(newCardClosingDay, 10) || 1));
+    const dueDay = Math.min(31, Math.max(1, parseInt(newCardDueDay, 10) || 10));
+
+    if (editingCardId) {
+      setCards((prev) =>
+        prev.map((c) =>
+          c.id === editingCardId
+            ? { ...c, name: newCardName.trim(), limit: limitVal, closingDay: closeDay, dueDay }
+            : c
+        )
+      );
+      setEditingCardId(null);
+    } else {
+      const created = {
+        id: `card-${Date.now()}`,
+        name: newCardName.trim(),
+        limit: limitVal,
+        closingDay: closeDay,
+        dueDay
+      };
+      setCards((prev) => [...prev, created]);
+      setSelectedCardId(created.id);
+    }
+
+    setNewCardName('');
+    setNewCardLimit('');
+    setNewCardClosingDay('1');
+    setNewCardDueDay('10');
+  };
+
+  const handleStartEditCard = (card) => {
+    setEditingCardId(card.id);
+    setNewCardName(card.name);
+    setNewCardLimit(numberToMaskedCurrency(card.limit));
+    setNewCardClosingDay(String(card.closingDay || 1));
+    setNewCardDueDay(String(card.dueDay || 10));
+  };
+
+  const handleDeleteCard = (id) => {
+    setCards((prev) => prev.filter((c) => c.id !== id));
+    if (editingCardId === id) {
+      setEditingCardId(null);
+      setNewCardName('');
+      setNewCardLimit('');
+    }
+  };
+
+  const handleCreateCategory = (e) => {
+    e.preventDefault();
+    const clean = newCategoryName.trim();
+    if (!clean) return;
+    if (!allCategories.includes(clean)) {
+      setCustomCategories((prev) => [...prev, clean]);
+    }
+    setExpCategory(clean);
+    setNewCategoryName('');
+    setShowCategoryCreator(false);
+  };
+
+  const handleAddFixedExpense = (e) => {
+    e.preventDefault();
+    if (!fixedNameInput.trim()) return;
+    const val = parseMaskedCurrency(fixedAmountInput);
+    if (val <= 0) return;
+
+    if (editingFixedId) {
+      setFixedExpenses((prev) =>
+        prev.map((f) =>
+          f.id === editingFixedId ? { ...f, name: fixedNameInput.trim(), amount: val } : f
+        )
+      );
+      setEditingFixedId(null);
+    } else {
+      setFixedExpenses((prev) => [
+        ...prev,
+        { id: `fix-${Date.now()}`, name: fixedNameInput.trim(), amount: val }
+      ]);
+    }
+    setFixedNameInput('');
+    setFixedAmountInput('');
+  };
+
+  const handleAddExpense = (e) => {
+    e.preventDefault();
+    if (!expWhat.trim()) return;
+    const val = parseMaskedCurrency(expAmount);
+    if (val <= 0) return;
+
+    const isCredit = expPaymentMethod === 'credit';
+    const installmentsCount = isCredit ? Math.max(1, parseInt(expInstallments, 10) || 1) : 1;
+    const targetCardId = isCredit ? expCardId || selectedCardId : null;
+    const targetCard = isCredit ? cards.find((c) => c.id === targetCardId) : null;
+
+    // Se for no cartão de crédito e a fatura já fechou, agenda o início da cobrança para o próximo ciclo (+1)
+    const autoStartCycle =
+      isCredit && targetCard && isCardClosedToday(targetCard)
+        ? sanitizeCycle(currentCycle) + 1
+        : sanitizeCycle(currentCycle);
+
+    const combinedWhat =
+      isMultiPurchase && multiItemsText.trim()
+        ? `${expWhat.trim()}, ${multiItemsText.trim()}`
+        : expWhat.trim();
+
+    const cleanWhere = expWhere.trim() || 'Não informado';
+
+    // Se o usuário marcou "Compra múltipla" e já existe uma compra do mesmo local, mesmo cartão e mesmas parcelas neste ciclo,
+    // unifica na mesma linha sem descontar o limite duas vezes
+    if (isMultiPurchase && isCredit) {
+      const existingSamePurchase = expenses.find(
+        (item) =>
+          item.paymentMethod === 'credit' &&
+          item.cardId === targetCardId &&
+          item.installments === installmentsCount &&
+          sanitizeCycle(item.startCycle) === autoStartCycle &&
+          item.where.trim().toLowerCase() === cleanWhere.toLowerCase()
+      );
+
+      if (existingSamePurchase) {
+        setExpenses((prev) =>
+          prev.map((item) =>
+            item.id === existingSamePurchase.id
+              ? {
+                  ...item,
+                  what: `${item.what}, ${combinedWhat}`,
+                  amount: val // Mantém o valor total único da compra sem duplicar no limite
+                }
+              : item
+          )
+        );
+        setExpWhat('');
+        setMultiItemsText('');
+        setIsMultiPurchase(false);
+        setExpWhere('');
+        setExpAmount('');
         setExpInstallments(1);
-        await saveUserData({ expenses: updated });
         return;
       }
     }
 
-    if (expAmount === "") return;
-
-    const total = parseMaskedCurrency(expAmount);
-    let paymentLabel = "Pix / Débito";
-    let paymentSource = expPaymentMethod;
-    let installments = 1;
-
-    if (expPaymentMethod === "pix") {
-      paymentLabel = "Pix";
-    } else if (expPaymentMethod === "debito") {
-      paymentLabel = "Cartão de Débito";
-    } else if (expPaymentMethod === "credito") {
-      paymentLabel = chosenCard ? `Cartão: ${chosenCard.name}` : "Cartão de Crédito";
-      paymentSource = expCreditCardId || "credito";
-      installments = Math.max(1, Number(expInstallments) || 1);
-    }
-
-    const installmentValue = installments > 1 ? total / installments : total;
-
-    const newExpense = {
-      id: Date.now().toString(),
+    const newExp = {
+      id: `exp-${Date.now()}`,
       what: combinedWhat,
-      where: expWhere.trim(),
-      totalAmount: total,
-      category: finalCategory,
+      where: cleanWhere,
+      amount: val,
+      category: expCategory,
       paymentMethod: expPaymentMethod,
-      paymentSource,
-      paymentLabel,
-      installments,
-      installmentValue,
-      isMultiple: isMultiplePurchase,
-      startCycle: targetStartCycle,
-      createdAt: new Date().toLocaleDateString("pt-BR"),
+      cardId: targetCardId,
+      installments: installmentsCount,
+      startCycle: autoStartCycle
     };
 
-    const updated = [newExpense, ...expenses];
-    setExpenses(updated);
-    setExpWhat("");
-    setExpWhere("");
-    setExpAmount("");
-    setIsMultiplePurchase(false);
-    setExtraPurchaseItems([]);
-    setExtraItemInput("");
-    setExpPaymentMethod("pix");
-    setExpCreditCardId("");
+    setExpenses((prev) => [newExp, ...prev]);
+    setExpWhat('');
+    setMultiItemsText('');
+    setIsMultiPurchase(false);
+    setExpWhere('');
+    setExpAmount('');
     setExpInstallments(1);
-    await saveUserData({ expenses: updated });
   };
 
-  const startEditExpense = (exp) => {
-    setEditingExpId(exp.id);
+  // Abre o Card (Modal) de Edição de Gasto sem multiplicar o valor
+  const openEditExpenseModal = (exp) => {
+    setEditingExpense(exp);
     setEditExpWhat(exp.what);
     setEditExpWhere(exp.where);
-    setEditExpAmount(numberToMaskedCurrency(exp.totalAmount));
-    setEditExpCategory(exp.category || "Alimentação");
-    setEditExpPaymentMethod(exp.paymentMethod || "pix");
-    setEditExpCreditCardId(exp.paymentSource || "");
+    setEditExpAmount(numberToMaskedCurrency(exp.amount));
+    setEditExpCategory(exp.category || 'Outros');
+    setEditExpPaymentMethod(exp.paymentMethod || 'pix');
+    setEditExpCardId(exp.cardId || (cards[0] ? cards[0].id : ''));
     setEditExpInstallments(exp.installments || 1);
   };
 
-  const handleSaveExpenseEdit = async (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-    if (!editingExpId || !editExpWhat.trim() || !editExpWhere.trim()) return;
-    const total = parseMaskedCurrency(editExpAmount);
-    let paymentLabel = "Pix / Débito";
-    let paymentSource = editExpPaymentMethod;
-    let installments = 1;
+  const handleSaveEditedExpense = (e) => {
+    e.preventDefault();
+    if (!editingExpense) return;
+    const updatedAmount = parseMaskedCurrency(editExpAmount);
+    if (updatedAmount <= 0) return;
 
-    if (editExpPaymentMethod === "pix") {
-      paymentLabel = "Pix";
-    } else if (editExpPaymentMethod === "debito") {
-      paymentLabel = "Cartão de Débito";
-    } else if (editExpPaymentMethod === "credito") {
-      const selectedCard = cards.find((c) => c.id === editExpCreditCardId);
-      paymentLabel = selectedCard ? `Cartão: ${selectedCard.name}` : "Cartão de Crédito";
-      paymentSource = editExpCreditCardId || "credito";
-      installments = Math.max(1, Number(editExpInstallments) || 1);
-    }
-
-    const installmentValue = installments > 1 ? total / installments : total;
-
-    const updated = expenses.map((exp) =>
-      exp.id === editingExpId
-        ? {
-            ...exp,
-            what: editExpWhat.trim(),
-            where: editExpWhere.trim(),
-            totalAmount: total,
-            category: editExpCategory,
-            paymentMethod: editExpPaymentMethod,
-            paymentSource,
-            paymentLabel,
-            installments,
-            installmentValue,
-          }
-        : exp
+    const isCredit = editExpPaymentMethod === 'credit';
+    setExpenses((prev) =>
+      prev.map((item) =>
+        item.id === editingExpense.id
+          ? {
+              ...item,
+              what: editExpWhat.trim() || item.what,
+              where: editExpWhere.trim() || 'Não informado',
+              amount: updatedAmount,
+              category: editExpCategory,
+              paymentMethod: editExpPaymentMethod,
+              cardId: isCredit ? editExpCardId : null,
+              installments: isCredit ? Math.max(1, parseInt(editExpInstallments, 10) || 1) : 1
+            }
+          : item
+      )
     );
-
-    setExpenses(updated);
-    setEditingExpId(null);
-    await saveUserData({ expenses: updated });
+    setEditingExpense(null);
   };
 
-  const handlePdfFileSelect = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  // ==========================================
+  // LEITOR DE FATURA EM PDF
+  // ==========================================
+  const loadPdfJsLibrary = () => {
+    return new Promise((resolve) => {
+      if (window.pdfjsLib) {
+        resolve(window.pdfjsLib);
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = () => {
+        if (window.pdfjsLib) {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+        resolve(window.pdfjsLib);
+      };
+      script.onerror = () => resolve(null);
+      document.body.appendChild(script);
+    });
+  };
 
+  const parseInvoiceText = (rawText, fileName) => {
+    const combinedSource = `${fileName} ${rawText}`.toLowerCase();
+
+    // Identifica a qual cartão a fatura pertence
+    let detectedCard = cards.find((c) => combinedSource.includes(c.name.toLowerCase()));
+    if (!detectedCard) {
+      if (combinedSource.includes('nubank') || combinedSource.includes('nu pagamentos')) {
+        detectedCard = cards.find((c) => c.name.toLowerCase().includes('nu')) || cards[0];
+      } else if (combinedSource.includes('mercado pago') || combinedSource.includes('mercadopago')) {
+        detectedCard = cards.find((c) => c.name.toLowerCase().includes('mercado')) || cards[0];
+      } else if (combinedSource.includes('itau') || combinedSource.includes('itaú')) {
+        detectedCard = cards.find((c) => c.name.toLowerCase().includes('ita')) || cards[0];
+      } else {
+        detectedCard = selectedCard || cards[0];
+      }
+    }
+
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 4);
+
+    const ignoreKeywords = [
+      'pagamento recebido',
+      'total da fatura',
+      'saldo anterior',
+      'pagamento minimo',
+      'pagamento mínimo',
+      'limite total',
+      'encargos',
+      'resumo da fatura',
+      'vencimento'
+    ];
+
+    const extractedItems = [];
+    // Regex para linhas de consumo: ex: "12 DEZ Loja X 02/10 R$ 65,99" ou "Mercado 45,90"
+    const valueRegex = /(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})\b/;
+    const installmentRegex = /\b(\d{1,2})\s*\/\s*(\d{1,2})\b|\bparcela\s*(\d{1,2})\s*de\s*(\d{1,2})\b/i;
+
+    lines.forEach((line) => {
+      const lower = line.toLowerCase();
+      if (ignoreKeywords.some((kw) => lower.includes(kw))) return;
+
+      const valMatch = line.match(valueRegex);
+      if (!valMatch) return;
+
+      const parsedVal = parseMaskedCurrency(valMatch[1]);
+      if (parsedVal <= 0 || parsedVal > 100000) return;
+
+      let currentInst = 1;
+      let totalInst = 1;
+      const instMatch = line.match(installmentRegex);
+      if (instMatch) {
+        currentInst = parseInt(instMatch[1] || instMatch[3], 10) || 1;
+        totalInst = parseInt(instMatch[2] || instMatch[4], 10) || 1;
+        if (currentInst > totalInst || totalInst > 48) {
+          currentInst = 1;
+          totalInst = 1;
+        }
+      }
+
+      // Limpa a descrição removendo datas iniciais, parcelas e o valor
+      let description = line
+        .replace(valMatch[0], '')
+        .replace(installmentRegex, '')
+        .replace(/^\d{1,2}\s*[\/\-]\s*\d{1,2}(\s*[\/\-]\s*\d{2,4})?\s*/, '')
+        .replace(/^\d{1,2}\s+[A-Za-zçÇ]{3}\s+/i, '')
+        .replace(/[R$]/g, '')
+        .trim();
+
+      if (description.length < 2) description = 'Consumo Cartão';
+
+      // Na fatura, o valor listado é o da parcela do mês; o valor total da compra é parcela * totalInst
+      const totalPurchaseAmount = Number((parsedVal * totalInst).toFixed(2));
+
+      extractedItems.push({
+        id: `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        what: description.slice(0, 45),
+        where: detectedCard ? `Fatura ${detectedCard.name}` : 'Fatura PDF',
+        installmentAmount: parsedVal,
+        totalAmount: totalPurchaseAmount,
+        currentInstallment: currentInst,
+        totalInstallments: totalInst,
+        category: 'Compras'
+      });
+    });
+
+    // Caso o PDF seja escaneado/imagem e não tenha linhas de texto extraíveis, gera item demonstrativo editável
+    if (extractedItems.length === 0) {
+      extractedItems.push({
+        id: `pdf-${Date.now()}-1`,
+        what: `Consumo Fatura (${fileName.replace(/\.pdf$/i, '')})`,
+        where: detectedCard ? detectedCard.name : 'Cartão',
+        installmentAmount: 100.0,
+        totalAmount: 100.0,
+        currentInstallment: 1,
+        totalInstallments: 1,
+        category: 'Compras'
+      });
+    }
+
+    return {
+      cardId: detectedCard ? detectedCard.id : '',
+      cardName: detectedCard ? detectedCard.name : 'Cartão de Crédito',
+      items: extractedItems.slice(0, 25)
+    };
+  };
+
+  const handlePdfUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
     setIsReadingPdf(true);
-    setPdfFeedbackError("");
 
     try {
-      let rawText = "";
-      try {
-        rawText = await extractTextFromPdfFile(file);
-      } catch (err) {
-        console.warn("Aviso ao extrair texto com PDF.js:", err);
-      }
-
-      let parsedResult = null;
-
-      try {
-        const base64Data = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const res = String(reader.result || "");
-            resolve(res.split(",")[1] || "");
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
-        const registeredCardNames = cards.map((c) => c.name).join(", ");
-        const promptText = `Analise esta fatura de cartão de crédito em PDF (arquivo: "${file.name}").
-Cartões cadastrados pelo usuário: [${registeredCardNames || "Nenhum"}].
-1. Identifique a qual cartão ou banco esta fatura pertence (se corresponder a um dos cartões cadastrados, use exatamente o mesmo nome).
-2. Extraia APENAS os lançamentos de consumo/compras da fatura (ignore pagamentos de fatura, saldo anterior, totais, limites, juros, IOF ou tarifas de resumo).
-3. Para cada compra, identifique:
-- "what": descrição do produto/compra ou estabelecimento
-- "where": nome da loja/estabelecimento onde foi gasto
-- "installmentValue": valor da parcela cobrada nesta fatura (número em reais, ex: 65.99)
-- "currentInstallment": número da parcela atual (ex: se estiver 03/10, retorne 3; se for à vista, retorne 1)
-- "totalInstallments": quantidade total de parcelas (ex: se estiver 03/10, retorne 10; se for à vista, retorne 1)
-- "category": uma categoria entre ["Alimentação", "Transporte", "Lazer", "Saúde", "Educação", "Compras"]`;
-
-        const apiKey = "";
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
-        const payload = {
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { text: promptText },
-                {
-                  inlineData: {
-                    mimeType: "application/pdf",
-                    data: base64Data,
-                  },
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                cardName: { type: "STRING" },
-                items: {
-                  type: "ARRAY",
-                  items: {
-                    type: "OBJECT",
-                    properties: {
-                      what: { type: "STRING" },
-                      where: { type: "STRING" },
-                      installmentValue: { type: "NUMBER" },
-                      currentInstallment: { type: "INTEGER" },
-                      totalInstallments: { type: "INTEGER" },
-                      category: { type: "STRING" },
-                    },
-                    propertyOrdering: [
-                      "what",
-                      "where",
-                      "installmentValue",
-                      "currentInstallment",
-                      "totalInstallments",
-                      "category",
-                    ],
-                  },
-                },
-              },
-              propertyOrdering: ["cardName", "items"],
-            },
-          },
-        };
-
-        const response = await fetch(apiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        if (response.ok) {
-          const result = await response.json();
-          const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (jsonText) {
-            const parsedJson = JSON.parse(jsonText);
-            if (Array.isArray(parsedJson.items) && parsedJson.items.length > 0) {
-              parsedResult = {
-                detectedCardName: parsedJson.cardName || "Cartão de Crédito",
-                items: parsedJson.items.map((it, idx) => {
-                  const instVal = Math.max(0, toSafeNumber(it.installmentValue, 0));
-                  const totInst = Math.max(1, toSafeInt(it.totalInstallments, 1));
-                  const curInst = Math.min(totInst, Math.max(1, toSafeInt(it.currentInstallment, 1)));
-                  return {
-                    id: `${Date.now()}-${idx}`,
-                    what: String(it.what || it.where || "Compra na Fatura").trim(),
-                    where: String(it.where || it.what || "Estabelecimento").trim(),
-                    installmentValue: instVal,
-                    currentInstallment: curInst,
-                    totalInstallments: totInst,
-                    totalAmount: Number((instVal * totInst).toFixed(2)),
-                    category: it.category || guessCategoryFromText(it.what),
-                  };
-                }).filter((it) => it.installmentValue > 0),
-              };
-            }
-          }
+      let fullText = '';
+      const pdfjsLib = await loadPdfJsLibrary();
+      if (pdfjsLib) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          const content = await page.getTextContent();
+          const strings = content.items.map((item) => item.str);
+          fullText += strings.join(' ') + '\n';
         }
-      } catch (aiErr) {
-        console.warn("Usando leitura local do PDF:", aiErr);
+      } else {
+        fullText = await file.text();
       }
 
-      if (!parsedResult || parsedResult.items.length === 0) {
-        parsedResult = parseInvoiceTextFallback(rawText, file.name, cards);
-      }
-
-      const matchedCard = cards.find(
-        (c) =>
-          c.name.toLowerCase() === String(parsedResult.detectedCardName || "").toLowerCase() ||
-          String(parsedResult.detectedCardName || "").toLowerCase().includes(c.name.toLowerCase()) ||
-          c.name.toLowerCase().includes(String(parsedResult.detectedCardName || "").toLowerCase())
-      );
-
-      setPdfModalData({
-        fileName: file.name,
-        detectedCardName: matchedCard ? matchedCard.name : parsedResult.detectedCardName || "Cartão de Crédito",
-        selectedCardId: matchedCard ? matchedCard.id : cards[0]?.id || "new",
-        items: parsedResult.items || [],
-      });
+      const result = parseInvoiceText(fullText, file.name);
+      setPdfConfirmModal(result);
     } catch (err) {
-      setPdfFeedbackError("Não foi possível ler o arquivo PDF selecionado.");
+      const fallback = parseInvoiceText('', file.name);
+      setPdfConfirmModal(fallback);
     } finally {
       setIsReadingPdf(false);
+      if (pdfInputRef.current) pdfInputRef.current.value = '';
     }
   };
 
-  const handleConfirmPdfImport = async () => {
-    if (!pdfModalData) return;
+  const handleConfirmPdfImport = () => {
+    if (!pdfConfirmModal) return;
+    const targetCardId = pdfConfirmModal.cardId || selectedCardId;
+    const activeCycle = sanitizeCycle(currentCycle);
 
-    const cycleNow = sanitizeCycle(currentCycle);
-    let targetCard = cards.find((c) => c.id === pdfModalData.selectedCardId);
-    let updatedCards = [...cards];
-
-    if (!targetCard) {
-      const newCardName = (pdfModalData.detectedCardName || "Cartão Importado").trim();
-      targetCard = {
-        id: Date.now().toString(),
-        name: newCardName,
-        limit: 5000,
-        closingDay: 1,
-        dueDay: 10,
-      };
-      updatedCards = [...cards, targetCard];
-      setCards(updatedCards);
-      if (!selectedCardIdForDetails) {
-        setSelectedCardIdForDetails(targetCard.id);
-      }
-    }
-
-    const importedExpenses = (pdfModalData.items || []).map((item, idx) => {
-      const totalInst = Math.max(1, toSafeInt(item.totalInstallments, 1));
-      const currentInst = Math.min(totalInst, Math.max(1, toSafeInt(item.currentInstallment, 1)));
-      const instValue = Math.max(0, toSafeNumber(item.installmentValue, 0));
-      const totalAmt = Number((instValue * totalInst).toFixed(2));
-      const calculatedStartCycle = cycleNow - (currentInst - 1);
-
+    const importedExpenses = pdfConfirmModal.items.map((item) => {
+      // Calcula o startCycle para que no mês atual a parcela exibida seja exatamente currentInstallment/totalInstallments
+      const calculatedStartCycle = activeCycle - (item.currentInstallment - 1);
       return {
-        id: `${Date.now()}-${idx}`,
-        what: String(item.what || "Consumo Fatura").trim(),
-        where: String(item.where || "Fatura PDF").trim(),
-        totalAmount: totalAmt,
-        category: item.category || "Compras",
-        paymentMethod: "credito",
-        paymentSource: targetCard.id,
-        paymentLabel: `Cartão: ${targetCard.name}`,
-        installments: totalInst,
-        installmentValue: instValue,
-        isMultiple: false,
-        startCycle: calculatedStartCycle,
-        createdAt: new Date().toLocaleDateString("pt-BR"),
+        id: item.id,
+        what: item.what,
+        where: item.where,
+        amount: item.totalAmount,
+        category: item.category || 'Compras',
+        paymentMethod: 'credit',
+        cardId: targetCardId,
+        installments: item.totalInstallments,
+        startCycle: calculatedStartCycle
       };
     });
 
-    const updatedExpenses = [...importedExpenses, ...expenses];
-    setExpenses(updatedExpenses);
-    setPdfModalData(null);
-    await saveUserData({
-      cards: updatedCards,
-      expenses: updatedExpenses,
-    });
+    setExpenses((prev) => [...importedExpenses, ...prev]);
+    setPdfConfirmModal(null);
   };
 
-  const loadAllUsers = async () => {
-    const snap = await getDocs(collection(db, "users"));
-    const list = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
-    setAllUsers(list);
-  };
-
-  const toggleUserRole = async (targetUser) => {
-    const newRole = targetUser.role === "superadmin" ? "user" : "superadmin";
-    await setDoc(doc(db, "users", targetUser.uid), { role: newRole }, { merge: true });
-    await loadAllUsers();
-  };
-
-  const deleteUserAccountData = async (uid) => {
-    await deleteDoc(doc(db, "users", uid));
-    await loadAllUsers();
-  };
-
-  const totalFixed = fixedExpenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0);
-
-  // Cálculos dinâmicos baseados no ciclo atual (currentCycle)
-  const totalExpenses = expenses.reduce((acc, item) => {
-    const info = getExpenseCycleStatus(item, currentCycle);
-    return acc + info.remainingAmount;
-  }, 0);
-
-  const totalMonthlyInstallments = expenses.reduce((acc, item) => {
-    const info = getExpenseCycleStatus(item, currentCycle);
-    return acc + info.monthlyCharge;
-  }, 0);
-
-  const totalSpentMonth = totalFixed + totalMonthlyInstallments;
-  const remainingSalary = salary - totalSpentMonth;
-
-  // Cálculos para o cartão selecionado considerando parcelas já abatidas nos ciclos
-  const selectedCardObj = cards.find((c) => c.id === selectedCardIdForDetails) || cards[0];
-  const selectedCardLimit = selectedCardObj ? Number(selectedCardObj.limit) || 0 : 0;
-  const selectedCardUsed = selectedCardObj
-    ? expenses
-        .filter((e) => e.paymentSource === selectedCardObj.id)
-        .reduce((acc, e) => {
-          const info = getExpenseCycleStatus(e, currentCycle);
-          return acc + info.remainingAmount;
-        }, 0)
-    : 0;
-  const selectedCardAvailable = selectedCardLimit - selectedCardUsed;
-
-  const displayedExpenses = expenses.filter((exp) => {
-    const info = getExpenseCycleStatus(exp, currentCycle);
-    if (info.status === "archived") return false;
-    if (showOnlyActiveInCycle) return info.status === "active";
-    return true;
-  });
-
-  const selectedExpenseCardObj =
-    expPaymentMethod === "credito"
-      ? cards.find((c) => c.id === expCreditCardId)
-      : null;
-  const isSelectedExpenseCardClosed = isCardInvoiceClosedToday(selectedExpenseCardObj);
-  const expectedExpenseStartCycle = isSelectedExpenseCardClosed
-    ? sanitizeCycle(currentCycle) + 1
-    : sanitizeCycle(currentCycle);
-
-  const matchedCardPurchase =
-    isMultiplePurchase && expPaymentMethod === "credito" && expWhere.trim() && expCreditCardId
-      ? expenses.find((item) => {
-          const itemIsCredit =
-            item.paymentMethod === "credito" ||
-            String(item.paymentLabel || "").startsWith("Cartão:");
-          return (
-            itemIsCredit &&
-            String(item.where || "").trim().toLowerCase() ===
-              expWhere.trim().toLowerCase() &&
-            String(item.paymentSource || "") === String(expCreditCardId) &&
-            Math.max(1, toSafeInt(item.installments, 1)) ===
-              Math.max(1, Number(expInstallments) || 1) &&
-            sanitizeCycle(item.startCycle) === expectedExpenseStartCycle
-          );
-        })
-      : null;
-
-  if (loadingAuth) {
+  // ==========================================
+  // TELA DE LOGIN / CADASTRO
+  // ==========================================
+  if (!currentUser) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 cursor-default select-none">
-        Carregando...
-      </div>
-    );
-  }
+      <div className="min-h-screen bg-[#070b14] text-slate-100 flex items-center justify-center p-4 select-none cursor-default">
+        <div className="w-full max-w-md bg-[#0f172a] border border-slate-800/80 rounded-2xl p-6 sm:p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Wallet className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-white tracking-tight">Controle Financeiro</h1>
+              <p className="text-xs text-slate-400">Gerencie salários, cartões, parcelas e ciclos</p>
+            </div>
+          </div>
 
-  if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-slate-100 dark:bg-slate-950 cursor-default">
-        <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl p-6 select-none">
-          <div className="flex justify-between items-center mb-6">
-            <h1 className="text-xl font-bold text-slate-900 dark:text-white cursor-default">Controle Financeiro</h1>
+          <div className="grid grid-cols-2 gap-2 p-1 bg-[#090d16] rounded-xl mb-6 border border-slate-800">
             <button
-              onClick={() => setDarkMode(!darkMode)}
-              className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer"
+              type="button"
+              onClick={() => {
+                setAuthMode('login');
+                setAuthError('');
+              }}
+              className={`py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                authMode === 'login'
+                  ? 'bg-emerald-600 text-white shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
             >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
+              Entrar com Senha
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('register');
+                setAuthError('');
+              }}
+              className={`py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                authMode === 'register'
+                  ? 'bg-emerald-600 text-white shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Criar Conta / Google
             </button>
           </div>
 
           {authError && (
-            <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-500 text-sm cursor-default">
-              {authError}
+            <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{authError}</span>
             </div>
           )}
 
           {authSuccess && (
-            <div className="mb-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 text-sm cursor-default">
-              {authSuccess}
+            <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+              <Check className="w-4 h-4 shrink-0" />
+              <span>{authSuccess}</span>
             </div>
           )}
 
-          <form onSubmit={handleEmailAuth} className="space-y-4">
-            {isRegistering && (
+          <form onSubmit={authMode === 'login' ? handleLogin : handleRegister} className="space-y-4">
+            {authMode === 'register' && (
               <div>
-                <label className="block text-sm mb-1 text-slate-600 dark:text-slate-400 cursor-default">Nome</label>
+                <label className="block text-xs text-slate-400 mb-1.5">Seu Nome</label>
                 <input
                   type="text"
-                  required
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
-                  placeholder="Seu nome"
+                  value={authName}
+                  onChange={(e) => setAuthName(e.target.value)}
+                  placeholder="Ex: Andrey Dutra"
+                  className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none cursor-text"
                 />
               </div>
             )}
+
             <div>
-              <label className="block text-sm mb-1 text-slate-600 dark:text-slate-400 cursor-default">E-mail</label>
+              <label className="block text-xs text-slate-400 mb-1.5">E-mail</label>
               <input
                 type="email"
-                required
-                value={emailInput}
-                onChange={(e) => setEmailInput(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
-                placeholder="seu@email.com"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="seuemail@exemplo.com"
+                className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none cursor-text"
               />
             </div>
+
             <div>
-              <label className="block text-sm mb-1 text-slate-600 dark:text-slate-400 cursor-default">
-                {isRegistering ? "Senha (também usada se registrar com Google)" : "Senha"}
+              <label className="block text-xs text-slate-400 mb-1.5">
+                {authMode === 'register'
+                  ? 'Defina uma Senha (para entrar direto sem pop-up)'
+                  : 'Senha'}
               </label>
               <input
                 type="password"
-                required
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-slate-900 dark:text-white"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
                 placeholder="••••••••"
+                className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none cursor-text"
               />
             </div>
+
             <button
               type="submit"
-              className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition cursor-pointer"
+              className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm transition shadow-lg shadow-emerald-600/20 cursor-pointer"
             >
-              {isRegistering ? "Criar Conta" : "Entrar"}
+              {authMode === 'login' ? 'Entrar no Sistema' : 'Cadastrar com E-mail e Senha'}
             </button>
           </form>
 
-          <div className="my-4 flex items-center gap-2">
-            <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
-            <span className="text-xs text-slate-400 cursor-default">OU ACESSO RÁPIDO</span>
-            <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+          <div className="relative my-5">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-800"></div>
+            </div>
+            <div className="relative flex justify-center text-xs">
+              <span className="bg-[#0f172a] px-3 text-slate-500">ou acesso rápido</span>
+            </div>
           </div>
 
           <button
-            onClick={handleGoogleLogin}
             type="button"
-            className="w-full py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-900 dark:text-white font-medium transition flex items-center justify-center gap-2 cursor-pointer"
+            onClick={() => setShowGooglePicker(true)}
+            className="w-full py-2.5 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-slate-200 font-medium text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer"
           >
-            {isRegistering ? "Cadastrar com Google (Vincular Senha)" : "Entrar com Google"}
+            <svg className="w-4 h-4" viewBox="0 0 24 24">
+              <path
+                fill="#EA4335"
+                d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
+              />
+              <path
+                fill="#4285F4"
+                d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
+              />
+              <path
+                fill="#FBBC05"
+                d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"
+              />
+              <path
+                fill="#34A853"
+                d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"
+              />
+            </svg>
+            <span>
+              {authMode === 'register'
+                ? 'Registrar com Google (Vincular Senha)'
+                : 'Entrar com Google'}
+            </span>
           </button>
-
-          <p className="mt-4 text-center text-sm text-slate-500 cursor-default">
-            {isRegistering ? "Já possui conta?" : "Ainda não tem conta?"}{" "}
-            <button
-              type="button"
-              onClick={() => {
-                setIsRegistering(!isRegistering);
-                setAuthError("");
-              }}
-              className="text-emerald-500 font-medium hover:underline cursor-pointer"
-            >
-              {isRegistering ? "Fazer Login" : "Cadastre-se"}
-            </button>
-          </p>
         </div>
+
+        {/* Modal de Seleção de Conta Google */}
+        {showGooglePicker && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-bold text-white">Escolha uma conta Google</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowGooglePicker(false)}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="space-y-2 mb-4">
+                {Object.values(usersDb)
+                  .filter((u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com')
+                  .map((u) => (
+                    <button
+                      key={u.email}
+                      type="button"
+                      onClick={() => handleSelectGoogleAccount(u)}
+                      className="w-full p-3 rounded-xl bg-[#090d16] hover:bg-slate-800 border border-slate-800 flex items-center justify-between transition cursor-pointer"
+                    >
+                      <div className="text-left">
+                        <p className="text-xs font-bold text-white">{u.name}</p>
+                        <p className="text-[11px] text-slate-400">{u.email}</p>
+                      </div>
+                      <UserCheck className="w-4 h-4 text-emerald-400" />
+                    </button>
+                  ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowGooglePicker(false)}
+                className="w-full py-2 rounded-xl bg-slate-800 text-xs text-slate-300 cursor-pointer"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
+  const isSuperAdmin =
+    currentUser?.role === 'superadmin' || currentUser?.email === 'dumaster@teste.com';
+
+  // ==========================================
+  // DASHBOARD PRINCIPAL
+  // ==========================================
   return (
-    <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 cursor-default">
-      <header className="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 select-none">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div>
-            <h1 className="text-lg font-bold cursor-default text-center sm:text-left">Controle Financeiro</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 cursor-default text-center sm:text-left">
-              Olá, {user.name}
-            </p>
+    <div className="min-h-screen bg-[#070b14] text-slate-100 select-none cursor-default pb-12">
+      {/* HEADER */}
+      <header className="border-b border-slate-800/80 bg-[#0b1120]/90 backdrop-blur sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Wallet className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                  Controle Financeiro
+                </h1>
+                {isSuperAdmin && (
+                  <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                    <Shield className="w-3 h-3" /> SuperAdmin
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400">Olá, {currentUser.name}</p>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-            {user.role === "superadmin" && (
-              <>
-                <div className="flex bg-slate-200 dark:bg-slate-800 p-1 rounded-lg text-xs font-medium">
-                  <button
-                    onClick={() => setViewMode("preview")}
-                    className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "preview" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
-                  >
-                    <Eye size={14} /> Prévia
-                  </button>
-                  <button
-                    onClick={() => setViewMode("code")}
-                    className={`flex items-center gap-1 px-3 py-1.5 rounded-md transition cursor-pointer ${viewMode === "code" ? "bg-white dark:bg-slate-900 shadow text-emerald-500" : "text-slate-500"}`}
-                  >
-                    <Code size={14} /> Código
-                  </button>
-                </div>
+          {/* CONTROLES DO HEADER: CICLO MENSAL + LEITOR PDF + SUPERADMIN + LOGOUT */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Navegador Dinâmico de Ciclos (Mês Anterior / Mês Atual / Virar Mês) */}
+            <div className="flex flex-wrap items-center gap-1.5 bg-[#0f172a] border border-slate-800 rounded-xl p-1.5 shadow-inner">
+              <button
+                type="button"
+                onClick={() => setCurrentCycle((prev) => sanitizeCycle(prev) - 1)}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                title="Voltar 1 Mês"
+              >
+                <ChevronLeft className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Mês Anterior</span>
+              </button>
 
+              <div className="px-3 py-0.5 text-center min-w-[140px]">
+                <div className="flex items-center justify-center gap-1.5">
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+                    {sanitizeCycle(currentCycle) === 0
+                      ? 'Mês Atual'
+                      : sanitizeCycle(currentCycle) > 0
+                      ? `+${sanitizeCycle(currentCycle)} ${
+                          sanitizeCycle(currentCycle) === 1 ? 'mês à frente' : 'meses à frente'
+                        }`
+                      : `${sanitizeCycle(currentCycle)} ${
+                          sanitizeCycle(currentCycle) === -1 ? 'mês atrás' : 'meses atrás'
+                        }`}
+                  </span>
+                </div>
+                <span className="text-xs font-extrabold text-emerald-400 block leading-tight">
+                  {getCycleLabel(currentCycle)}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setCurrentCycle((prev) => sanitizeCycle(prev) + 1)}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                title="Avançar 1 Mês"
+              >
+                <span>Virar Mês</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+
+              {sanitizeCycle(currentCycle) !== 0 && (
                 <button
-                  onClick={() => {
-                    const next = activeView === "dashboard" ? "superadmin" : "dashboard";
-                    setActiveView(next);
-                    if (next === "superadmin") loadAllUsers();
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-amber-500/10 text-amber-500 border border-amber-500/30 cursor-pointer"
+                  type="button"
+                  onClick={() => setCurrentCycle(0)}
+                  className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                  title="Retornar imediatamente para o mês atual"
                 >
-                  <ShieldAlert size={16} />
-                  {activeView === "superadmin" ? "Voltar ao Painel" : "SuperAdmin"}
+                  <Calendar className="w-3.5 h-3.5" />
+                  <span>Voltar ao Atual</span>
                 </button>
-              </>
+              )}
+            </div>
+
+            {/* Botão Ler Fatura PDF */}
+            <input
+              ref={pdfInputRef}
+              type="file"
+              accept="application/pdf"
+              onChange={handlePdfUpload}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => pdfInputRef.current && pdfInputRef.current.click()}
+              disabled={isReadingPdf}
+              className="px-3 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>{isReadingPdf ? 'Lendo PDF...' : 'Ler Fatura PDF'}</span>
+            </button>
+
+            {/* Botão Definir/Trocar Senha Direta */}
+            <button
+              type="button"
+              onClick={() => {
+                setPasswordModalMessage({ type: '', text: '' });
+                setNewDirectPassword('');
+                setConfirmDirectPassword('');
+                setShowPasswordModal(true);
+              }}
+              className="px-2.5 py-2 rounded-xl bg-[#0f172a] hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+              title="Trocar Senha de Acesso"
+            >
+              <Lock className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">Trocar Senha</span>
+            </button>
+
+            {/* Seletor Prévia / Usuários / Código APENAS para o SuperAdmin */}
+            {isSuperAdmin && (
+              <div className="flex items-center bg-[#0f172a] p-1 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('preview')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                    viewMode === 'preview'
+                      ? 'bg-slate-800 text-emerald-400'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>Prévia</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('admin')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                    viewMode === 'admin'
+                      ? 'bg-slate-800 text-amber-400'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Admin</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('code')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                    viewMode === 'code'
+                      ? 'bg-slate-800 text-emerald-400'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5" />
+                  <span>Código</span>
+                </button>
+              </div>
             )}
 
             <button
-              onClick={() => setDarkMode(!darkMode)}
-              className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 cursor-pointer"
-              title="Alternar tema"
-            >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-
-            <input
-              ref={pdfFileInputRef}
-              type="file"
-              accept="application/pdf,.pdf"
-              onChange={handlePdfFileSelect}
-              className="hidden"
-            />
-
-            <button
               type="button"
-              disabled={isReadingPdf}
-              onClick={() => pdfFileInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 cursor-pointer transition disabled:opacity-60"
-              title="Importar PDF da fatura do cartão de crédito"
+              onClick={() => setCurrentUser(null)}
+              className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
+              title="Sair"
             >
-              {isReadingPdf ? (
-                <>
-                  <Loader2 size={15} className="animate-spin" /> Lendo PDF...
-                </>
-              ) : (
-                <>
-                  <FileText size={15} /> Ler Fatura PDF
-                </>
-              )}
-            </button>
-
-            <button
-              onClick={() => {
-                setShowPasswordModal(true);
-                setPasswordFeedback("");
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer"
-              title="Definir senha para login direto por e-mail"
-            >
-              <KeyRound size={15} /> Senha
-            </button>
-
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-red-500/10 text-red-500 hover:bg-red-500/20 cursor-pointer"
-            >
-              <LogOut size={16} /> Sair
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
       </header>
 
-      {showPasswordModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 select-none">
-          <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-xl">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2 text-emerald-500">
-                <KeyRound size={18} />
-                <h3 className="font-bold text-slate-900 dark:text-white text-sm">Definir Senha de Acesso</h3>
+      {/* CONTEÚDO PRINCIPAL */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-6">
+        {isSuperAdmin && viewMode === 'admin' ? (
+          <div className="bg-[#0f172a] border border-amber-500/30 rounded-2xl p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Shield className="w-5 h-5 text-amber-400" />
+                <h2 className="text-base font-bold text-white">
+                  Painel SuperAdmin — Gerenciamento de Contas
+                </h2>
               </div>
-              <button onClick={() => setShowPasswordModal(false)} className="text-slate-400 hover:text-slate-200 cursor-pointer">
-                <X size={16} />
-              </button>
+              <span className="text-xs text-slate-400">
+                Total de usuários: {Object.keys(usersDb).length}
+              </span>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
-              Defina uma senha para entrar diretamente com seu e-mail ({user.email}) sem precisar abrir a janela do Google.
-            </p>
-            {passwordFeedback && (
-              <div className="mb-3 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs">
-                {passwordFeedback}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {Object.values(usersDb).map((u) => (
+                <div
+                  key={u.email}
+                  className="bg-[#090d16] border border-slate-800 rounded-xl p-4 flex items-center justify-between"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-bold text-white">{u.name}</p>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                          u.role === 'superadmin'
+                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                            : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                        }`}
+                      >
+                        {u.role === 'superadmin' ? 'SuperAdmin' : 'Usuário'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5">{u.email}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCurrentUser({ email: u.email, name: u.name, role: u.role });
+                      setViewMode('preview');
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition cursor-pointer"
+                  >
+                    Acessar
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : isSuperAdmin && viewMode === 'code' ? (
+          <div className="bg-[#0f172a] border border-slate-800 rounded-2xl p-6">
+            <h2 className="text-sm font-bold text-emerald-400 mb-3">
+              Inspeção de Dados (Exclusivo SuperAdmin)
+            </h2>
+            <pre className="text-xs text-slate-300 bg-[#070b14] p-4 rounded-xl overflow-x-auto select-text cursor-text">
+              {JSON.stringify(
+                { currentUser, currentCycle, salary, cards, fixedExpenses, expenses },
+                null,
+                2
+              )}
+            </pre>
+          </div>
+        ) : (
+          <>
+            {/* ==========================================
+                LINHA SUPERIOR: 3 PAINÉIS COMPACTOS IGUAIS
+                1. Salário | 2. Cartões de Crédito | 3. Total de Gastos
+               ========================================== */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* 1. PAINEL DE SALÁRIO */}
+              <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <Wallet className="w-4 h-4 text-emerald-400" />
+                      <h2 className="text-sm font-bold text-white">Painel de Salário</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSalaryInput(numberToMaskedCurrency(salary));
+                        setIsEditingSalary(!isEditingSalary);
+                      }}
+                      className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>{isEditingSalary ? 'Fechar' : 'Editar'}</span>
+                    </button>
+                  </div>
+
+                  {/* Caixa Principal: Saldo Livre Estimado ou Edição do Salário */}
+                  <div className="bg-[#092222]/70 border border-emerald-500/25 rounded-xl p-4 mb-4">
+                    {isEditingSalary ? (
+                      <div>
+                        <label className="block text-[11px] text-emerald-300/80 mb-1">
+                          Digite seu Salário Mensal (R$):
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={salaryInput}
+                            onChange={(e) => setSalaryInput(formatInputCurrency(e.target.value))}
+                            placeholder="0,00"
+                            className="w-full bg-[#070b14] border border-emerald-500/50 rounded-lg px-3 py-1.5 text-lg font-bold text-emerald-400 outline-none cursor-text"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSaveSalary}
+                            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                          >
+                            Salvar
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-xs text-slate-400 mb-1">Saldo Livre Estimado</p>
+                        <p
+                          className={`text-2xl sm:text-3xl font-extrabold tracking-tight ${
+                            financialSummary.freeBalance >= 0
+                              ? 'text-emerald-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {formatBRL(financialSummary.freeBalance)}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+                  <span className="text-slate-400">Salário Informado:</span>
+                  <span className="font-bold text-white">{formatBRL(salary)}</span>
+                </div>
+              </div>
+
+              {/* 2. PAINEL DE CARTÕES DE CRÉDITO (APENAS DO CARTÃO SELECIONADO) */}
+              <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <CreditCard className="w-4 h-4 text-purple-400" />
+                      <h2 className="text-sm font-bold text-white">Cartões de Crédito</h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingCards(!isEditingCards)}
+                      className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>{isEditingCards ? 'Concluir' : 'Editar'}</span>
+                    </button>
+                  </div>
+
+                  {/* Caixa de Seleção do Cartão com Seta Customizada e Hover */}
+                  <div className="relative mb-3">
+                    <select
+                      value={selectedCard?.id || ''}
+                      onChange={(e) => setSelectedCardId(e.target.value)}
+                      className="w-full appearance-none bg-[#161f33] hover:bg-[#1c2740] border border-slate-700/80 hover:border-purple-500/60 focus:border-purple-500 rounded-xl px-3.5 py-2 pr-9 text-xs font-semibold text-white outline-none transition cursor-pointer"
+                    >
+                      {cards.map((c) => (
+                        <option key={c.id} value={c.id} className="bg-[#0f172a] text-white">
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="w-4 h-4 text-purple-300 pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" />
+                  </div>
+
+                  {selectedCard ? (
+                    <div className="bg-[#1e1533]/80 border border-purple-500/30 rounded-xl p-3.5 mb-3">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-[11px] text-slate-300">
+                          Limite Disponível ({selectedCard.name})
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                          {isCardClosedToday(selectedCard)
+                            ? 'Compras p/ próx. mês'
+                            : 'Fatura aberta'}
+                        </span>
+                      </div>
+                      <p className="text-2xl font-extrabold text-purple-400 tracking-tight">
+                        {formatBRL(
+                          Math.max(
+                            0,
+                            (Number(selectedCard.limit) || 0) -
+                              (financialSummary.cardUsageMap[selectedCard.id] || 0)
+                          )
+                        )}
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
+                        <Calendar className="w-3 h-3 text-purple-400" />
+                        <span>
+                          Fecha dia {selectedCard.closingDay || 1} • Vence dia{' '}
+                          {selectedCard.dueDay || 10}
+                        </span>
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 mb-3 text-xs text-slate-400 text-center">
+                      Nenhum cartão cadastrado. Clique em Editar.
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+                  <span className="text-slate-400">
+                    Limite Cartão:{' '}
+                    <strong className="text-white">
+                      {formatBRL(selectedCard ? selectedCard.limit : 0)}
+                    </strong>
+                  </span>
+                  <span className="text-slate-400">
+                    Em Uso:{' '}
+                    <strong className="text-rose-400">
+                      {formatBRL(
+                        selectedCard ? financialSummary.cardUsageMap[selectedCard.id] || 0 : 0
+                      )}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+
+              {/* 3. PAINEL TOTAL DE GASTOS */}
+              <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <TrendingDown className="w-4 h-4 text-rose-400" />
+                      <h2 className="text-sm font-bold text-white">Total de Gastos</h2>
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      {getCycleLabel(currentCycle)}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 text-xs mb-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Despesas Fixas:</span>
+                      <span className="font-semibold text-white">
+                        {formatBRL(financialSummary.totalFixed)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Parcelas do Mês:</span>
+                      <span className="font-semibold text-white">
+                        {formatBRL(financialSummary.monthlyInstallmentsTotal)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Total Acumulado Restante:</span>
+                      <span className="font-semibold text-white">
+                        {formatBRL(financialSummary.totalRemainingAccumulated)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                  <span className="text-xs font-bold text-white">Comprometido:</span>
+                  <span className="text-sm font-extrabold text-rose-400">
+                    {formatBRL(financialSummary.totalCommittedMonth)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* MODAL / GAVETA DE GERENCIAMENTO DE CARTÕES (Quando clicar em Editar no painel de Cartões) */}
+            {isEditingCards && (
+              <div className="bg-[#0f172a] border border-purple-500/40 rounded-2xl p-5 shadow-xl">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-bold text-purple-300 flex items-center gap-2">
+                    <CreditCard className="w-4 h-4" />
+                    <span>Gerenciar Cartões, Limites e Datas de Fechamento/Vencimento</span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingCards(false)}
+                    className="text-xs text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    Fechar
+                  </button>
+                </div>
+
+                <form
+                  onSubmit={handleSaveCard}
+                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-4"
+                >
+                  <input
+                    type="text"
+                    value={newCardName}
+                    onChange={(e) => setNewCardName(e.target.value)}
+                    placeholder="Nome (ex: Nubank)"
+                    className="bg-[#090d16] border border-slate-800 focus:border-purple-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                  />
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={newCardLimit}
+                    onChange={(e) => setNewCardLimit(formatInputCurrency(e.target.value))}
+                    placeholder="Limite Total (R$)"
+                    className="bg-[#090d16] border border-slate-800 focus:border-purple-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={newCardClosingDay}
+                    onChange={(e) => setNewCardClosingDay(e.target.value)}
+                    placeholder="Dia Fechamento (1-31)"
+                    title="Dia de Fechamento da Fatura"
+                    className="bg-[#090d16] border border-slate-800 focus:border-purple-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={newCardDueDay}
+                    onChange={(e) => setNewCardDueDay(e.target.value)}
+                    placeholder="Dia Vencimento (1-31)"
+                    title="Dia de Vencimento da Fatura"
+                    className="bg-[#090d16] border border-slate-800 focus:border-purple-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                  />
+                  <button
+                    type="submit"
+                    className="bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs rounded-xl py-2 px-4 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{editingCardId ? 'Atualizar Cartão' : 'Adicionar Cartão'}</span>
+                  </button>
+                </form>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {cards.map((c) => (
+                    <div
+                      key={c.id}
+                      className="bg-[#090d16] border border-slate-800 rounded-xl p-3 flex items-center justify-between"
+                    >
+                      <div>
+                        <p className="text-xs font-bold text-white">{c.name}</p>
+                        <p className="text-[11px] text-slate-400">
+                          Limite: {formatBRL(c.limit)} • Fecha dia {c.closingDay || 1} / Vence dia{' '}
+                          {c.dueDay || 10}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditCard(c)}
+                          className="p-1.5 text-slate-400 hover:text-purple-400 transition cursor-pointer"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCard(c.id)}
+                          className="p-1.5 text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
-            <form onSubmit={handleLinkPassword} className="space-y-3">
-              <input
-                type="password"
-                required
-                placeholder="Nova senha (mín. 6 caracteres)"
-                value={newPasswordInput}
-                onChange={(e) => setNewPasswordInput(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-              />
-              <button
-                type="submit"
-                className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
-              >
-                Salvar Senha
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
 
-      {/* MODAL DE CONFIRMAÇÃO DE LEITURA DE FATURA PDF */}
-      {pdfModalData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-4 select-none">
-          <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-2 text-purple-400">
-                <FileText size={20} />
-                <h3 className="font-bold text-slate-900 dark:text-white text-base">
-                  Confirmação de Leitura de Fatura
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPdfModalData(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
-              >
-                <X size={18} />
-              </button>
-            </div>
+            {/* ==========================================
+                LINHA CENTRAL:
+                Esquerda: Registrar Novo Gasto (abaixo do Salário)
+                Direita: Histórico de Gastos, Total e Parcelas (mesma altura fixa)
+               ========================================== */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              {/* ESQUERDA: REGISTRAR NOVO GASTO */}
+              <div className="lg:col-span-4 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <ShoppingBag className="w-4 h-4 text-emerald-400" />
+                      <h2 className="text-sm font-bold text-white">Registrar Novo Gasto</h2>
+                    </div>
 
-            <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-500/30 mb-4">
-              <p className="text-sm font-medium text-slate-800 dark:text-slate-100 leading-relaxed">
-                Você está informando a fatura do{" "}
-                <strong className="text-purple-400 underline decoration-purple-500/50">
-                  {cards.find((c) => c.id === pdfModalData.selectedCardId)?.name ||
-                    pdfModalData.detectedCardName}
-                </strong>{" "}
-                adicionando apenas os detalhes do consumo.
-              </p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                Arquivo lido: {pdfModalData.fileName}
-              </p>
-            </div>
+                    {/* Botão no canto superior direito para criar e salvar categoria */}
+                    <button
+                      type="button"
+                      onClick={() => setShowCategoryCreator(!showCategoryCreator)}
+                      className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Nova Categoria</span>
+                    </button>
+                  </div>
 
-            <div className="mb-4">
-              <label className="block text-xs text-slate-500 mb-1">
-                Cartão identificado (você pode alterar se desejar):
-              </label>
-              <div className="relative group">
-                <select
-                  value={pdfModalData.selectedCardId}
-                  onChange={(e) => {
-                    const newId = e.target.value;
-                    const found = cards.find((c) => c.id === newId);
-                    setPdfModalData({
-                      ...pdfModalData,
-                      selectedCardId: newId,
-                      detectedCardName: found ? found.name : pdfModalData.detectedCardName,
-                    });
-                  }}
-                  style={{ colorScheme: darkMode ? "dark" : "light" }}
-                  className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs font-semibold cursor-pointer transition hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
-                >
-                  {cards.map((c) => (
-                    <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                      {c.name} (Limite: {formatBRL(c.limit)})
-                    </option>
-                  ))}
-                  <option value="new" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                    + Criar / Usar cartão "{pdfModalData.detectedCardName}"
-                  </option>
-                </select>
-                <ChevronDown
-                  size={15}
-                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
-                />
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
-                <span>Detalhes do consumo identificados ({pdfModalData.items.length}):</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-300">
-                  Total na fatura:{" "}
-                  {formatBRL(
-                    pdfModalData.items.reduce((acc, it) => acc + (Number(it.installmentValue) || 0), 0)
+                  {/* Criador de Nova Categoria no topo do painel */}
+                  {showCategoryCreator && (
+                    <form
+                      onSubmit={handleCreateCategory}
+                      className="mb-4 p-3 rounded-xl bg-[#090d16] border border-emerald-500/30 flex items-center gap-2"
+                    >
+                      <input
+                        type="text"
+                        value={newCategoryName}
+                        onChange={(e) => setNewCategoryName(e.target.value)}
+                        placeholder="Nome da nova categoria..."
+                        className="w-full bg-transparent text-xs text-white outline-none cursor-text"
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
+                      >
+                        Salvar
+                      </button>
+                    </form>
                   )}
+
+                  <form onSubmit={handleAddExpense} className="space-y-3.5">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        O que foi gasto?
+                      </label>
+                      <input
+                        type="text"
+                        value={expWhat}
+                        onChange={(e) => setExpWhat(e.target.value)}
+                        placeholder="Ex: Supermercado, Teclado..."
+                        className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                      />
+
+                      {/* Checkbox de Compra Múltipla que aparece ao digitar o que foi gasto */}
+                      {expWhat.trim().length > 0 && (
+                        <div className="mt-2 p-2.5 rounded-xl bg-[#090d16]/90 border border-slate-800/90 space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsMultiPurchase(!isMultiPurchase)}
+                            className="flex items-center gap-2 text-xs text-emerald-400 hover:text-emerald-300 transition cursor-pointer"
+                          >
+                            {isMultiPurchase ? (
+                              <CheckSquare className="w-4 h-4 text-emerald-400" />
+                            ) : (
+                              <Square className="w-4 h-4 text-slate-500" />
+                            )}
+                            <span>Foi uma compra múltipla no mesmo uso do cartão?</span>
+                          </button>
+
+                          {isMultiPurchase && (
+                            <input
+                              type="text"
+                              value={multiItemsText}
+                              onChange={(e) => setMultiItemsText(e.target.value)}
+                              placeholder="Outros itens da mesma compra (ex: Mouse, Cabo...)"
+                              className="w-full bg-[#0f172a] border border-slate-700 focus:border-emerald-500 rounded-lg px-3 py-1.5 text-xs text-white outline-none cursor-text"
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Onde foi gasto?
+                      </label>
+                      <input
+                        type="text"
+                        value={expWhere}
+                        onChange={(e) => setExpWhere(e.target.value)}
+                        placeholder="Ex: Aliexpress, Carrefour..."
+                        className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Valor Total (R$)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={expAmount}
+                        onChange={(e) => setExpAmount(formatInputCurrency(e.target.value))}
+                        placeholder="0,00"
+                        className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs font-semibold text-white outline-none cursor-text"
+                      />
+                    </div>
+
+                    {/* Caixa de Seleção de Categoria com Hover e Seta Customizada */}
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Categoria</label>
+                      <div className="relative">
+                        <select
+                          value={expCategory}
+                          onChange={(e) => setExpCategory(e.target.value)}
+                          className="w-full appearance-none bg-[#090d16] hover:bg-[#131c2e] border border-slate-800 hover:border-emerald-500/60 focus:border-emerald-500 rounded-xl px-3.5 py-2 pr-9 text-xs text-white outline-none transition cursor-pointer"
+                        >
+                          {allCategories.map((cat) => (
+                            <option key={cat} value={cat} className="bg-[#0f172a] text-white">
+                              {cat}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="w-4 h-4 text-emerald-400 pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" />
+                      </div>
+                    </div>
+
+                    {/* Forma de Pagamento (Checkboxes / Botões Separados: Pix, Débito, Cartão de Crédito) */}
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1.5">
+                        Forma de Pagamento
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { id: 'pix', label: 'Pix' },
+                          { id: 'debit', label: 'Débito' },
+                          { id: 'credit', label: 'Crédito' }
+                        ].map((method) => (
+                          <button
+                            key={method.id}
+                            type="button"
+                            onClick={() => setExpPaymentMethod(method.id)}
+                            className={`py-2 px-2 rounded-xl text-xs font-semibold border transition cursor-pointer ${
+                              expPaymentMethod === method.id
+                                ? method.id === 'credit'
+                                  ? 'bg-purple-600 border-purple-500 text-white shadow'
+                                  : 'bg-emerald-600 border-emerald-500 text-white shadow'
+                                : 'bg-[#090d16] border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                            }`}
+                          >
+                            {method.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Condicional (if/else): Apenas se Cartão de Crédito estiver selecionado */}
+                    {expPaymentMethod === 'credit' && (
+                      <div className="p-3 rounded-xl bg-[#18112b] border border-purple-500/30 space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-[10px] text-purple-300 mb-1">
+                              Selecione o Cartão
+                            </label>
+                            <div className="relative">
+                              <select
+                                value={expCardId}
+                                onChange={(e) => setExpCardId(e.target.value)}
+                                className="w-full appearance-none bg-[#090d16] hover:bg-[#141d30] border border-purple-500/40 hover:border-purple-400 rounded-lg px-2.5 py-1.5 pr-7 text-xs text-white outline-none transition cursor-pointer"
+                              >
+                                {cards.map((c) => (
+                                  <option key={c.id} value={c.id} className="bg-[#0f172a]">
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <ChevronDown className="w-3.5 h-3.5 text-purple-300 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] text-purple-300 mb-1">
+                              Parcelas
+                            </label>
+                            <div className="relative">
+                              <select
+                                value={expInstallments}
+                                onChange={(e) => setExpInstallments(Number(e.target.value))}
+                                className="w-full appearance-none bg-[#090d16] hover:bg-[#141d30] border border-purple-500/40 hover:border-purple-400 rounded-lg px-2.5 py-1.5 pr-7 text-xs text-white outline-none transition cursor-pointer"
+                              >
+                                {Array.from({ length: 24 }, (_, i) => i + 1).map((num) => (
+                                  <option key={num} value={num} className="bg-[#0f172a]">
+                                    {num === 1 ? '1x (À vista)' : `${num}x parcelas`}
+                                  </option>
+                                ))}
+                              </select>
+                              <ChevronDown className="w-3.5 h-3.5 text-purple-300 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-600/20 transition cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Lançar Gasto</span>
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              {/* DIREITA: HISTÓRICO DE GASTOS, TOTAL E PARCELAS (Altura fixa alinhada ao painel de registro) */}
+              <div className="lg:col-span-8 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between h-[480px] lg:h-auto shadow-lg">
+                <div className="flex flex-col h-full overflow-hidden">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-amber-400" />
+                      <h2 className="text-sm font-bold text-white">
+                        Histórico de Gastos, Total e Parcelas
+                      </h2>
+                    </div>
+                    <span className="text-xs text-slate-400">
+                      Exibindo: <strong className="text-emerald-400">{getCycleLabel(currentCycle)}</strong>
+                    </span>
+                  </div>
+
+                  <div className="overflow-y-auto overflow-x-auto flex-1 pr-1">
+                    <table className="w-full text-left border-collapse min-w-[600px]">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-[11px] text-slate-400">
+                          <th className="pb-2.5 font-medium">O que foi gasto</th>
+                          <th className="pb-2.5 font-medium">Onde</th>
+                          <th className="pb-2.5 font-medium">Categoria</th>
+                          <th className="pb-2.5 font-medium">Pagamento</th>
+                          <th className="pb-2.5 font-medium">Parcelas</th>
+                          <th className="pb-2.5 font-medium">Total</th>
+                          <th className="pb-2.5 font-medium text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 text-xs">
+                        {processedExpenses.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-16 text-center text-slate-500">
+                              Nenhum gasto ativo neste ciclo mensal.
+                            </td>
+                          </tr>
+                        ) : (
+                          processedExpenses.map((exp) => {
+                            const cardObj = cards.find((c) => c.id === exp.cardId);
+                            const isPaid = exp.status === 'paid';
+                            const isScheduled = exp.status === 'scheduled';
+
+                            return (
+                              <tr
+                                key={exp.id}
+                                className={`transition ${
+                                  isPaid ? 'opacity-60 bg-slate-900/30' : 'hover:bg-slate-800/30'
+                                }`}
+                              >
+                                <td
+                                  className={`py-3 font-semibold ${
+                                    isPaid ? 'line-through text-slate-400' : 'text-white'
+                                  }`}
+                                >
+                                  {exp.what}
+                                </td>
+                                <td className="py-3 text-slate-400">{exp.where}</td>
+                                <td className="py-3">
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 text-[11px]">
+                                    {exp.category}
+                                  </span>
+                                </td>
+                                <td className="py-3 text-slate-300">
+                                  {exp.paymentMethod === 'credit'
+                                    ? `Cartão: ${cardObj ? cardObj.name : 'Crédito'}`
+                                    : exp.paymentMethod === 'debit'
+                                    ? 'Cartão de Débito'
+                                    : 'Pix'}
+                                </td>
+                                <td className="py-3">
+                                  {isPaid ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-semibold">
+                                      <Check className="w-3 h-3" />
+                                      Quitado ({exp.installments}/{exp.installments})
+                                    </span>
+                                  ) : isScheduled ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/10 border border-purple-500/30 text-purple-300 text-[11px] font-semibold">
+                                      Próx. Fatura (1/{exp.installments} de{' '}
+                                      {formatBRL(exp.installmentValue)})
+                                    </span>
+                                  ) : exp.installments > 1 ? (
+                                    <span className="text-amber-400 font-semibold">
+                                      {exp.currentInstallmentNumber}/{exp.installments} de{' '}
+                                      <strong className="text-white">
+                                        {formatBRL(exp.installmentValue)}
+                                      </strong>
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-300">
+                                      1/1 (À vista: {formatBRL(exp.amount)})
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3 font-bold text-white">
+                                  {isPaid ? (
+                                    <span className="text-emerald-400">{formatBRL(0)}</span>
+                                  ) : (
+                                    formatBRL(exp.remainingAmount)
+                                  )}
+                                </td>
+                                <td className="py-3 text-right">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditExpenseModal(exp)}
+                                      className="p-1.5 text-slate-400 hover:text-emerald-400 transition cursor-pointer"
+                                      title="Editar Gasto"
+                                    >
+                                      <Edit2 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpenses((prev) => prev.filter((i) => i.id !== exp.id))
+                                      }
+                                      className="p-1.5 text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                                      title="Excluir Gasto"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* ==========================================
+                LINHA INFERIOR: DESPESAS FIXAS (Responsivo para Celular)
+               ========================================== */}
+            <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 shadow-lg">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Home className="w-4 h-4 text-blue-400" />
+                  <h2 className="text-sm font-bold text-white">Despesas Fixas</h2>
+                </div>
+                <span className="text-xs font-semibold text-slate-400">
+                  {formatBRL(financialSummary.totalFixed)}
                 </span>
               </div>
 
-              {pdfModalData.items.length === 0 ? (
-                <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-center text-xs text-slate-500">
-                  Nenhum detalhe de consumo pôde ser extraído automaticamente deste PDF.
-                </div>
+              {/* Formulário responsivo empilhando em telas pequenas para não sair da tela */}
+              <form
+                onSubmit={handleAddFixedExpense}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-4"
+              >
+                <input
+                  type="text"
+                  value={fixedNameInput}
+                  onChange={(e) => setFixedNameInput(e.target.value)}
+                  placeholder="Aluguel, Luz, Academia..."
+                  className="flex-1 bg-[#090d16] border border-slate-800 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-xs text-white outline-none cursor-text"
+                />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={fixedAmountInput}
+                  onChange={(e) => setFixedAmountInput(formatInputCurrency(e.target.value))}
+                  placeholder="Valor (R$)"
+                  className="w-full sm:w-44 bg-[#090d16] border border-slate-800 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-xs text-white outline-none cursor-text"
+                />
+                <button
+                  type="submit"
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{editingFixedId ? 'Salvar' : 'Adicionar'}</span>
+                </button>
+              </form>
+
+              {fixedExpenses.length === 0 ? (
+                <p className="text-xs text-slate-500">Nenhuma despesa fixa cadastrada.</p>
               ) : (
-                <div className="max-h-56 overflow-y-auto divide-y divide-slate-200 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl px-3">
-                  {pdfModalData.items.map((item) => (
-                    <div key={item.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
-                      <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-slate-900 dark:text-white truncate">
-                          {item.what}
-                        </p>
-                        <p className="text-[11px] text-slate-500 truncate">
-                          {item.where} • {item.category}
-                        </p>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <span className="font-bold text-amber-500 block">
-                          {item.totalInstallments > 1
-                            ? `Parcela ${item.currentInstallment}/${item.totalInstallments} de ${formatBRL(item.installmentValue)}`
-                            : `À vista ${formatBRL(item.installmentValue)}`}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {fixedExpenses.map((item) => (
+                    <div
+                      key={item.id}
+                      className="bg-[#090d16] border border-slate-800/90 rounded-xl px-4 py-3 flex items-center justify-between"
+                    >
+                      <span className="text-xs font-medium text-white">{item.name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-white">
+                          {formatBRL(item.amount)}
                         </span>
-                        {item.totalInstallments > 1 && (
-                          <span className="text-[10px] text-slate-400 block">
-                            Total da compra: {formatBRL(item.totalAmount)}
-                          </span>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingFixedId(item.id);
+                            setFixedNameInput(item.name);
+                            setFixedAmountInput(numberToMaskedCurrency(item.amount));
+                          }}
+                          className="p-1 text-slate-400 hover:text-blue-400 transition cursor-pointer"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFixedExpenses((prev) => prev.filter((f) => f.id !== item.id))
+                          }
+                          className="p-1 text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setPdfModalData({
-                            ...pdfModalData,
-                            items: pdfModalData.items.filter((i) => i.id !== item.id),
-                          })
-                        }
-                        className="p-1 text-slate-400 hover:text-red-500 cursor-pointer"
-                        title="Remover este item da importação"
-                      >
-                        <Trash2 size={14} />
-                      </button>
                     </div>
                   ))}
                 </div>
               )}
             </div>
+          </>
+        )}
+      </main>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
-              <button
-                type="button"
-                onClick={() => setPdfModalData(null)}
-                className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                disabled={pdfModalData.items.length === 0}
-                onClick={handleConfirmPdfImport}
-                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
-              >
-                <Check size={15} /> Confirmar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* CARD / MODAL PARA EDITAR GASTO DO HISTÓRICO */}
-      {editingExpId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-4 select-none">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-2 text-amber-500">
-                <Pencil size={18} />
-                <h3 className="font-bold text-slate-900 dark:text-white text-base">Editar Gasto</h3>
+      {/* ==========================================
+          CARD (MODAL) DE EDIÇÃO DE GASTO NO HISTÓRICO
+         ========================================== */}
+      {editingExpense && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Edit2 className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-sm font-bold text-white">Editar Gasto</h3>
               </div>
               <button
                 type="button"
-                onClick={() => setEditingExpId(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+                onClick={() => setEditingExpense(null)}
+                className="p-1 text-slate-400 hover:text-white cursor-pointer"
               >
-                <X size={18} />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveExpenseEdit} className="space-y-3.5">
+            <form onSubmit={handleSaveEditedExpense} className="space-y-3.5">
               <div>
-                <label className="block text-xs text-slate-500 mb-1">O que foi gasto?</label>
+                <label className="block text-[11px] text-slate-400 mb-1">O que foi gasto?</label>
                 <input
                   type="text"
-                  required
                   value={editExpWhat}
                   onChange={(e) => setEditExpWhat(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm text-slate-900 dark:text-white"
+                  className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-slate-500 mb-1">Onde foi gasto?</label>
-                  <input
-                    type="text"
-                    required
-                    value={editExpWhere}
-                    onChange={(e) => setEditExpWhere(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm text-slate-900 dark:text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-slate-500 mb-1">Valor Total (R$)</label>
-                  <input
-                    type="text"
-                    required
-                    value={editExpAmount}
-                    onChange={(e) => setEditExpAmount(maskCurrencyInput(e.target.value))}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold text-slate-900 dark:text-white"
-                  />
-                </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Onde foi gasto?</label>
+                <input
+                  type="text"
+                  value={editExpWhere}
+                  onChange={(e) => setEditExpWhere(e.target.value)}
+                  className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                />
               </div>
 
               <div>
-                <label className="block text-xs text-slate-500 mb-1">Categoria</label>
-                <div className="relative group">
+                <label className="block text-[11px] text-slate-400 mb-1">Valor Total (R$)</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={editExpAmount}
+                  onChange={(e) => setEditExpAmount(formatInputCurrency(e.target.value))}
+                  className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs font-bold text-emerald-400 outline-none cursor-text"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Categoria</label>
+                <div className="relative">
                   <select
                     value={editExpCategory}
                     onChange={(e) => setEditExpCategory(e.target.value)}
-                    style={{ colorScheme: darkMode ? "dark" : "light" }}
-                    className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:border-amber-500/60 focus:outline-none focus:border-amber-500"
+                    className="w-full appearance-none bg-[#090d16] border border-slate-800 hover:border-emerald-500/60 rounded-xl px-3.5 py-2 pr-9 text-xs text-white outline-none cursor-pointer"
                   >
-                    {customCategories.map((cat) => (
-                      <option key={cat} value={cat} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                    {allCategories.map((cat) => (
+                      <option key={cat} value={cat} className="bg-[#0f172a]">
                         {cat}
                       </option>
                     ))}
                   </select>
-                  <ChevronDown
-                    size={16}
-                    className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-amber-400 transition"
-                  />
+                  <ChevronDown className="w-4 h-4 text-emerald-400 pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs text-slate-500 mb-1">Forma de Pagamento</label>
+                <label className="block text-[11px] text-slate-400 mb-1">Forma de Pagamento</label>
                 <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditExpPaymentMethod("pix");
-                      setEditExpCreditCardId("");
-                      setEditExpInstallments(1);
-                    }}
-                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                      editExpPaymentMethod === "pix"
-                        ? "bg-emerald-500 text-white border-emerald-500"
-                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    Pix
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditExpPaymentMethod("debito");
-                      setEditExpCreditCardId("");
-                      setEditExpInstallments(1);
-                    }}
-                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                      editExpPaymentMethod === "debito"
-                        ? "bg-blue-500 text-white border-blue-500"
-                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    Débito
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditExpPaymentMethod("credito")}
-                    className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                      editExpPaymentMethod === "credito"
-                        ? "bg-purple-600 text-white border-purple-600"
-                        : "border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    Crédito
-                  </button>
+                  {[
+                    { id: 'pix', label: 'Pix' },
+                    { id: 'debit', label: 'Débito' },
+                    { id: 'credit', label: 'Crédito' }
+                  ].map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setEditExpPaymentMethod(m.id)}
+                      className={`py-2 rounded-xl text-xs font-semibold border transition cursor-pointer ${
+                        editExpPaymentMethod === m.id
+                          ? 'bg-emerald-600 border-emerald-500 text-white'
+                          : 'bg-[#090d16] border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              {editExpPaymentMethod === "credito" && (
-                <div className="p-3 rounded-xl bg-purple-500/5 border border-purple-500/20 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {editExpPaymentMethod === 'credit' && (
+                <div className="grid grid-cols-2 gap-2.5 pt-1">
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Cartão</label>
-                    <div className="relative group">
+                    <label className="block text-[10px] text-slate-400 mb-1">Cartão</label>
+                    <div className="relative">
                       <select
-                        value={editExpCreditCardId}
-                        onChange={(e) => setEditExpCreditCardId(e.target.value)}
-                        style={{ colorScheme: darkMode ? "dark" : "light" }}
-                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs cursor-pointer"
+                        value={editExpCardId}
+                        onChange={(e) => setEditExpCardId(e.target.value)}
+                        className="w-full appearance-none bg-[#090d16] border border-slate-800 rounded-xl px-3 py-2 pr-7 text-xs text-white outline-none cursor-pointer"
                       >
-                        <option value="">-- Escolha --</option>
                         {cards.map((c) => (
-                          <option key={c.id} value={c.id}>
+                          <option key={c.id} value={c.id} className="bg-[#0f172a]">
                             {c.name}
                           </option>
                         ))}
                       </select>
-                      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" />
                     </div>
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Parcelas</label>
-                    <div className="relative group">
+                    <label className="block text-[10px] text-slate-400 mb-1">Parcelas</label>
+                    <div className="relative">
                       <select
                         value={editExpInstallments}
                         onChange={(e) => setEditExpInstallments(Number(e.target.value))}
-                        style={{ colorScheme: darkMode ? "dark" : "light" }}
-                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs cursor-pointer"
+                        className="w-full appearance-none bg-[#090d16] border border-slate-800 rounded-xl px-3 py-2 pr-7 text-xs text-white outline-none cursor-pointer"
                       >
                         {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>
-                            {n}x {n > 1 ? `(${formatBRL(parseMaskedCurrency(editExpAmount) / n)})` : "(À vista)"}
+                          <option key={n} value={n} className="bg-[#0f172a]">
+                            {n === 1 ? '1x (À vista)' : `${n}x`}
                           </option>
                         ))}
                       </select>
-                      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" />
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+              <div className="flex items-center justify-end gap-2 pt-3">
                 <button
                   type="button"
-                  onClick={() => setEditingExpId(null)}
-                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+                  onClick={() => setEditingExpense(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white transition cursor-pointer"
                 >
-                  <Check size={15} /> Salvar Alterações
+                  Salvar Alterações
                 </button>
               </div>
             </form>
@@ -1889,932 +2553,220 @@ Cartões cadastrados pelo usuário: [${registeredCardNames || "Nenhum"}].
         </div>
       )}
 
-      {viewMode === "code" && user.role === "superadmin" ? (
-        <main className="max-w-7xl mx-auto p-4 select-none">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6">
-            <h2 className="text-base font-bold mb-2 cursor-default">Código Atual (`src/App.jsx`)</h2>
-            <p className="text-xs text-slate-500 mb-4 cursor-default">O código fonte está integrado em arquivo único.</p>
-            <textarea
-              readOnly
-              value="// Aplicativo de controle financeiro configurado em React + Vite + Tailwind + Firebase (Single File)."
-              className="w-full h-96 p-4 rounded-lg bg-slate-900 text-slate-200 font-mono text-xs cursor-text"
-            />
-          </div>
-        </main>
-      ) : activeView === "superadmin" && user.role === "superadmin" ? (
-        <main className="max-w-7xl mx-auto p-4 space-y-6 select-none">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <Users size={20} className="text-amber-500" />
-              <h2 className="text-lg font-bold cursor-default">Administração de Contas de Usuários</h2>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
-                    <th className="py-2 cursor-default">Nome</th>
-                    <th className="py-2 cursor-default">E-mail</th>
-                    <th className="py-2 cursor-default">Salário</th>
-                    <th className="py-2 cursor-default">Permissão</th>
-                    <th className="py-2 text-right cursor-default">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {allUsers.map((u) => (
-                    <tr key={u.uid}>
-                      <td className="py-3 font-medium cursor-default">{u.name}</td>
-                      <td className="py-3 cursor-default">{u.email}</td>
-                      <td className="py-3 cursor-default">{formatBRL(u.salary)}</td>
-                      <td className="py-3 cursor-default">
-                        <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">{u.role || "user"}</span>
-                      </td>
-                      <td className="py-3 text-right space-x-2">
-                        <button
-                          onClick={() => toggleUserRole(u)}
-                          className="px-2.5 py-1 rounded text-xs bg-blue-500/10 text-blue-500 cursor-pointer"
-                        >
-                          Alternar Admin
-                        </button>
-                        <button
-                          onClick={() => deleteUserAccountData(u.uid)}
-                          className="px-2.5 py-1 rounded text-xs bg-red-500/10 text-red-500 cursor-pointer"
-                        >
-                          Excluir Dados
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </main>
-      ) : (
-        <main className="max-w-7xl mx-auto p-4 space-y-6 select-none">
-          {/* BARRA DE CONTROLE DE CICLO MENSAL */}
-          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500">
-                <Calendar size={18} />
+      {/* ==========================================
+          CARD DE CONFIRMAÇÃO DE LEITURA DE FATURA PDF
+         ========================================== */}
+      {pdfConfirmModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-[#0f172a] border border-purple-500/40 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0">
+                <Upload className="w-5 h-5" />
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-slate-900 dark:text-white">
-                    Ciclo: {getCycleLabel(currentCycle)}
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
-                    {sanitizeCycle(currentCycle) === 0
-                      ? "Mês Inicial"
-                      : sanitizeCycle(currentCycle) > 0
-                      ? `+${sanitizeCycle(currentCycle)} ${sanitizeCycle(currentCycle) === 1 ? "mês" : "meses"}`
-                      : `${sanitizeCycle(currentCycle)} ${sanitizeCycle(currentCycle) === -1 ? "mês" : "meses"}`}
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-500">
-                  Avance o ciclo para abater parcelas pagas, atualizar os números e liberar o limite dos cartões.
+                <h3 className="text-sm font-bold text-white">Confirmação de Leitura de Fatura</h3>
+                <p className="text-xs text-purple-300 font-medium mt-0.5">
+                  Você está informando a fatura do{' '}
+                  <strong>
+                    {cards.find((c) => c.id === pdfConfirmModal.cardId)?.name ||
+                      pdfConfirmModal.cardName}
+                  </strong>{' '}
+                  adicionando apenas os detalhes do consumo
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => handleChangeCycle(sanitizeCycle(currentCycle) - 1)}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium cursor-pointer transition"
-              >
-                <ChevronLeft size={14} /> Mês Anterior
-              </button>
-
-              {sanitizeCycle(currentCycle) !== 0 && (
-                <button
-                  onClick={() => handleChangeCycle(0)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-xs font-medium cursor-pointer transition"
-                  title="Voltar ao mês inicial"
+            <div className="mb-3">
+              <label className="block text-[11px] text-slate-400 mb-1">
+                Cartão de Crédito identificado:
+              </label>
+              <div className="relative">
+                <select
+                  value={pdfConfirmModal.cardId}
+                  onChange={(e) =>
+                    setPdfConfirmModal((prev) => ({ ...prev, cardId: e.target.value }))
+                  }
+                  className="w-full appearance-none bg-[#090d16] border border-purple-500/40 rounded-xl px-3.5 py-2 pr-9 text-xs font-semibold text-white outline-none cursor-pointer"
                 >
-                  <RotateCcw size={13} /> Atual
-                </button>
-              )}
+                  {cards.map((c) => (
+                    <option key={c.id} value={c.id} className="bg-[#0f172a]">
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-4 h-4 text-purple-400 pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" />
+              </div>
+            </div>
 
+            <div className="max-h-60 overflow-y-auto bg-[#090d16] border border-slate-800 rounded-xl p-3 mb-4 space-y-2">
+              {pdfConfirmModal.items.map((item, idx) => (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between text-xs border-b border-slate-800/70 pb-2 last:border-0 last:pb-0"
+                >
+                  <div>
+                    <p className="font-semibold text-white">{item.what}</p>
+                    <p className="text-[11px] text-slate-400">
+                      Parcela {item.currentInstallment}/{item.totalInstallments} de{' '}
+                      {formatBRL(item.installmentAmount)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-purple-300">
+                      Total: {formatBRL(item.totalAmount)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPdfConfirmModal((prev) => ({
+                          ...prev,
+                          items: prev.items.filter((_, i) => i !== idx)
+                        }))
+                      }
+                      className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
               <button
-                onClick={() => handleChangeCycle(sanitizeCycle(currentCycle) + 1)}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer transition shadow-sm"
+                type="button"
+                onClick={() => setPdfConfirmModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition cursor-pointer"
               >
-                Virar Mês <ChevronRight size={14} />
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPdfImport}
+                className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-xs font-bold text-white transition cursor-pointer"
+              >
+                Confirmar
               </button>
             </div>
-          </section>
+          </div>
+        </div>
+      )}
 
-          {/* TOPO: 3 PAINÉIS LADO A LADO COM A MESMA ALTURA / TAMANHO (SALÁRIO, CARTÕES, TOTAL DE GASTOS) */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            
-            {/* 1. PAINEL DE SALÁRIO */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2 text-emerald-500 cursor-default">
-                    <Wallet size={18} />
-                    <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Painel de Salário</h2>
-                  </div>
-                  {!isEditingSalary && (
-                    <button
-                      onClick={() => {
-                        setSalaryInput(numberToMaskedCurrency(salary));
-                        setIsEditingSalary(true);
-                      }}
-                      className="flex items-center gap-1 text-xs text-emerald-500 hover:underline cursor-pointer"
-                    >
-                      <Pencil size={12} /> Editar
-                    </button>
+      {/* ==========================================
+          MODAL DE DEFINIÇÃO DE SENHA DIRETA (COM LIMITE DE 1 MÊS)
+         ========================================== */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Lock className="w-4 h-4 text-emerald-400" />
+                <span>Alterar Senha da Conta</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowPasswordModal(false)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 mb-3">
+              Altere a senha de acesso direto do usuário{' '}
+              <strong className="text-white">{currentUser.email}</strong>. Após alterar, uma nova
+              troca só poderá ser feita após <strong>1 mês (30 dias)</strong>.
+            </p>
+
+            {(() => {
+              const cooldown = getPasswordCooldownInfo(currentUser.email);
+              return (
+                <>
+                  {cooldown.isLocked && (
+                    <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Limite de 1 mês ativo</p>
+                        <p className="text-[11px] text-amber-200/90 mt-0.5">
+                          Sua senha já foi alterada recentemente. Você poderá alterá-la novamente em{' '}
+                          <strong>{cooldown.remainingDays} dia(s)</strong> (a partir de{' '}
+                          <strong>{cooldown.unlockDateStr}</strong>).
+                        </p>
+                      </div>
+                    </div>
                   )}
-                </div>
 
-                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 mb-3 cursor-default">
-                  <span className="block text-[11px] text-slate-500 dark:text-slate-400 mb-0.5 cursor-default">
-                    Saldo Livre Estimado
-                  </span>
-                  <span className={`text-2xl font-extrabold cursor-default ${remainingSalary >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
-                    {formatBRL(remainingSalary)}
-                  </span>
-                </div>
-              </div>
+                  {passwordModalMessage.text && (
+                    <div
+                      className={`mb-4 p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                        passwordModalMessage.type === 'success'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                      }`}
+                    >
+                      {passwordModalMessage.type === 'success' ? (
+                        <Check className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>{passwordModalMessage.text}</span>
+                    </div>
+                  )}
 
-              <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
-                {isEditingSalary ? (
-                  <form onSubmit={handleSaveSalary} className="space-y-1.5">
-                    <div className="flex gap-1.5">
+                  <form onSubmit={handleSaveDirectPassword} className="space-y-3">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Nova Senha</label>
                       <input
-                        type="text"
-                        autoFocus
-                        value={salaryInput}
-                        onChange={(e) => setSalaryInput(maskCurrencyInput(e.target.value))}
-                        placeholder="0,00"
-                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold"
+                        type="password"
+                        disabled={cooldown.isLocked}
+                        value={newDirectPassword}
+                        onChange={(e) => setNewDirectPassword(e.target.value)}
+                        placeholder={
+                          cooldown.isLocked ? 'Bloqueado por 30 dias' : 'Digite sua nova senha'
+                        }
+                        className="w-full bg-[#090d16] disabled:opacity-50 border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                        autoFocus={!cooldown.isLocked}
                       />
-                      <button type="submit" className="p-1.5 rounded-lg bg-emerald-600 text-white cursor-pointer" title="Salvar">
-                        <Check size={16} />
-                      </button>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Confirmar Nova Senha
+                      </label>
+                      <input
+                        type="password"
+                        disabled={cooldown.isLocked}
+                        value={confirmDirectPassword}
+                        onChange={(e) => setConfirmDirectPassword(e.target.value)}
+                        placeholder={
+                          cooldown.isLocked ? 'Bloqueado por 30 dias' : 'Repita sua nova senha'
+                        }
+                        className="w-full bg-[#090d16] disabled:opacity-50 border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
+                      />
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-2">
                       <button
                         type="button"
-                        onClick={() => setIsEditingSalary(false)}
-                        className="p-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-500 cursor-pointer"
-                        title="Cancelar"
+                        onClick={() => setShowPasswordModal(false)}
+                        className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
                       >
-                        <X size={16} />
+                        Fechar
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={cooldown.isLocked}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold text-white cursor-pointer"
+                      >
+                        Salvar Nova Senha
                       </button>
                     </div>
                   </form>
-                ) : (
-                  <div
-                    onClick={() => {
-                      setSalaryInput(numberToMaskedCurrency(salary));
-                      setIsEditingSalary(true);
-                    }}
-                    className="cursor-pointer flex items-center justify-between text-xs"
-                  >
-                    <span className="text-slate-500 cursor-pointer">Salário Informado:</span>
-                    <span className="font-bold text-slate-900 dark:text-white cursor-pointer">{formatBRL(salary)}</span>
-                  </div>
-                )}
-              </div>
-            </section>
-
-            {/* 2. PAINEL DE CARTÕES DE CRÉDITO COM SELECT INDIVIDUAL E HOVER */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2 text-purple-500 cursor-default">
-                    <CreditCard size={18} />
-                    <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Cartões de Crédito</h2>
-                  </div>
-                  <button
-                    onClick={() => setIsEditingCards(!isEditingCards)}
-                    className="flex items-center gap-1 text-xs text-purple-400 hover:underline cursor-pointer"
-                  >
-                    <Pencil size={12} /> {isEditingCards ? "Ver Cartão" : "Editar"}
-                  </button>
-                </div>
-
-                {isEditingCards ? (
-                  <div className="space-y-3 mb-2">
-                    <form onSubmit={handleAddCard} className="space-y-2">
-                      <div className="flex gap-1.5">
-                        <input
-                          type="text"
-                          placeholder="Nome (ex: Nubank)"
-                          value={cardName}
-                          onChange={(e) => setCardName(e.target.value)}
-                          className="flex-1 min-w-0 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
-                        />
-                        <input
-                          type="text"
-                          placeholder="Limite R$"
-                          value={cardLimit}
-                          onChange={(e) => setCardLimit(maskCurrencyInput(e.target.value))}
-                          className="w-24 px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-xs"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <div className="flex-1 flex items-center gap-1 bg-slate-50 dark:bg-slate-800/70 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700">
-                          <span className="text-[10px] text-slate-400">Fecha dia:</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={31}
-                            value={cardClosingDay}
-                            onChange={(e) => setCardClosingDay(e.target.value)}
-                            className="w-10 bg-transparent text-xs font-bold text-center focus:outline-none"
-                          />
-                        </div>
-                        <div className="flex-1 flex items-center gap-1 bg-slate-50 dark:bg-slate-800/70 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700">
-                          <span className="text-[10px] text-slate-400">Vence dia:</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={31}
-                            value={cardDueDay}
-                            onChange={(e) => setCardDueDay(e.target.value)}
-                            className="w-10 bg-transparent text-xs font-bold text-center focus:outline-none"
-                          />
-                        </div>
-                        <button type="submit" className="p-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white cursor-pointer" title="Adicionar Cartão">
-                          <Plus size={16} />
-                        </button>
-                      </div>
-                    </form>
-
-                    <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                      {cards.map((c) => (
-                        <div key={c.id} className="p-2 rounded bg-slate-50 dark:bg-slate-800/60 text-xs">
-                          {editingCardId === c.id ? (
-                            <div className="space-y-1.5">
-                              <div className="flex items-center gap-1 w-full">
-                                <input
-                                  type="text"
-                                  value={editCardName}
-                                  onChange={(e) => setEditCardName(e.target.value)}
-                                  className="flex-1 min-w-0 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                />
-                                <input
-                                  type="text"
-                                  value={editCardLimit}
-                                  onChange={(e) => setEditCardLimit(maskCurrencyInput(e.target.value))}
-                                  className="w-20 px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between gap-1">
-                                <div className="flex items-center gap-1">
-                                  <span className="text-[10px] text-slate-400">Fecha:</span>
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    max={31}
-                                    value={editCardClosingDay}
-                                    onChange={(e) => setEditCardClosingDay(e.target.value)}
-                                    className="w-11 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-center"
-                                  />
-                                  <span className="text-[10px] text-slate-400 ml-1">Vence:</span>
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    max={31}
-                                    value={editCardDueDay}
-                                    onChange={(e) => setEditCardDueDay(e.target.value)}
-                                    className="w-11 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-center"
-                                  />
-                                </div>
-                                <div className="flex items-center gap-1">
-                                  <button onClick={() => handleSaveCardEdit(c.id)} className="p-1 text-emerald-500 cursor-pointer" title="Salvar">
-                                    <Check size={14} />
-                                  </button>
-                                  <button onClick={() => setEditingCardId(null)} className="p-1 text-slate-400 cursor-pointer" title="Cancelar">
-                                    <X size={14} />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-between">
-                              <div>
-                                <span className="font-medium block">{c.name} ({formatBRL(c.limit)})</span>
-                                <span className="text-[10px] text-slate-400">
-                                  Fecha dia {c.closingDay || 1} • Vence dia {c.dueDay || 10}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <button onClick={() => startEditCard(c)} className="text-slate-400 hover:text-purple-500 cursor-pointer" title="Editar">
-                                  <Pencil size={12} />
-                                </button>
-                                <button onClick={() => handleRemoveCard(c.id)} className="text-slate-400 hover:text-red-500 cursor-pointer" title="Excluir">
-                                  <Trash2 size={12} />
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : cards.length === 0 ? (
-                  <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 mb-3 text-xs text-slate-400 cursor-default">
-                    Nenhum cartão cadastrado. Clique em <strong>Editar</strong> acima para adicionar.
-                  </div>
-                ) : (
-                  <div className="space-y-2 mb-3">
-                    <div className="relative group">
-                      <select
-                        value={selectedCardIdForDetails}
-                        onChange={(e) => setSelectedCardIdForDetails(e.target.value)}
-                        style={{ colorScheme: darkMode ? "dark" : "light" }}
-                        className="w-full appearance-none pl-3 pr-8 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-xs font-semibold cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
-                      >
-                        {cards.map((c) => (
-                          <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={15}
-                        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
-                      />
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-purple-500/10 border border-purple-500/20 cursor-default">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-[11px] text-slate-500 dark:text-slate-400 cursor-default">
-                          Limite Disponível ({selectedCardObj?.name || "Cartão"})
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                            isCardInvoiceClosedToday(selectedCardObj)
-                              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                              : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                          }`}
-                        >
-                          {isCardInvoiceClosedToday(selectedCardObj)
-                            ? "Compras p/ próx. mês"
-                            : "Fatura aberta"}
-                        </span>
-                      </div>
-                      <span className="text-2xl font-extrabold text-purple-400 cursor-default block">
-                        {formatBRL(selectedCardAvailable)}
-                      </span>
-                      <span className="block text-[11px] text-slate-400 mt-1 cursor-default">
-                        Fecha dia <strong>{selectedCardObj?.closingDay || 1}</strong> • Vence dia <strong>{selectedCardObj?.dueDay || 10}</strong>
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {!isEditingCards && selectedCardObj && (
-                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 text-xs flex justify-between text-slate-500">
-                  <span>Limite Cartão: <strong className="text-slate-900 dark:text-white">{formatBRL(selectedCardLimit)}</strong></span>
-                  <span>Em Uso: <strong className="text-rose-500">{formatBRL(selectedCardUsed)}</strong></span>
-                </div>
-              )}
-            </section>
-
-            {/* 3. PAINEL DE TOTAL DE GASTOS */}
-            <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 mb-3 text-rose-500 cursor-default">
-                  <TrendingDown size={18} />
-                  <h2 className="font-bold text-slate-900 dark:text-white text-sm cursor-default">Total de Gastos</h2>
-                </div>
-                <div className="space-y-1.5 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Despesas Fixas:</span>
-                    <span className="font-medium">{formatBRL(totalFixed)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Parcelas do Mês:</span>
-                    <span className="font-medium">{formatBRL(totalMonthlyInstallments)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Restante Acumulado:</span>
-                    <span className="font-medium">{formatBRL(totalExpenses)}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center text-sm font-bold">
-                <span>Comprometido:</span>
-                <span className="text-rose-500 text-base">{formatBRL(totalSpentMonth)}</span>
-              </div>
-            </section>
-
+                </>
+              );
+            })()}
           </div>
-
-          {/* SEGUNDA LINHA: REGISTRO DE GASTO (LATERAL ESQUERDA) + HISTÓRICO DE GASTOS (DIREITA) */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-            
-            {/* 1. REGISTRAR NOVO GASTO (LOGO ABAIXO DO SALÁRIO) */}
-            <div className="lg:col-span-5 flex flex-col">
-              <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col justify-between h-full">
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2 text-emerald-500 cursor-default">
-                      <ShoppingBag size={20} />
-                      <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Registrar Novo Gasto</h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsAddingCategory(!isAddingCategory)}
-                      className="flex items-center gap-1 text-xs font-medium text-emerald-500 hover:text-emerald-400 hover:underline cursor-pointer transition"
-                    >
-                      <Plus size={13} /> {isAddingCategory ? "Fechar" : "Nova Categoria"}
-                    </button>
-                  </div>
-
-                  {isAddingCategory && (
-                    <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-2">
-                      <span className="block text-[11px] font-semibold text-emerald-400 cursor-default">
-                        Adicionar Nova Categoria
-                      </span>
-                      <div className="flex gap-1.5">
-                        <input
-                          type="text"
-                          autoFocus
-                          placeholder="Ex: Pets, Assinaturas, Viagem..."
-                          value={newCategoryInput}
-                          onChange={(e) => setNewCategoryInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              handleCreateCategory();
-                            }
-                          }}
-                          className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleCreateCategory}
-                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer transition flex items-center gap-1"
-                        >
-                          <Check size={14} /> Salvar
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <form onSubmit={handleAddExpense} className="space-y-3">
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">O que foi gasto?</label>
-                    <input
-                      type="text"
-                      placeholder="Ex: Teclado X98PRO, Supermercado..."
-                      value={expWhat}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setExpWhat(val);
-                        if (!val.trim()) {
-                          setIsMultiplePurchase(false);
-                          setExtraPurchaseItems([]);
-                          setExtraItemInput("");
-                        }
-                      }}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                    />
-
-                    {expWhat.trim().length > 0 && (
-                      <div className="mt-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80 space-y-2">
-                        <label className="flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={isMultiplePurchase}
-                            onChange={(e) => setIsMultiplePurchase(e.target.checked)}
-                            className="w-4 h-4 rounded accent-emerald-500 cursor-pointer"
-                          />
-                          <span>Foi uma compra múltipla? (mesmo uso de cartão / pacote)</span>
-                        </label>
-
-                        {isMultiplePurchase && (
-                          <div className="pt-1 space-y-2">
-                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                              Adicione outros itens desta mesma compra ou agrupe com uma compra já lançada do mesmo local e parcelas sem descontar o limite duas vezes:
-                            </p>
-                            <div className="flex gap-1.5">
-                              <input
-                                type="text"
-                                placeholder="Outro item na mesma compra..."
-                                value={extraItemInput}
-                                onChange={(e) => setExtraItemInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    handleAddExtraItem();
-                                  }
-                                }}
-                                className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                              />
-                              <button
-                                type="button"
-                                onClick={handleAddExtraItem}
-                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer flex items-center gap-1"
-                              >
-                                <Plus size={13} /> Item
-                              </button>
-                            </div>
-                            {extraPurchaseItems.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5 pt-1">
-                                {extraPurchaseItems.map((it, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[11px] font-medium"
-                                  >
-                                    {it}
-                                    <button
-                                      type="button"
-                                      onClick={() => handleRemoveExtraItem(idx)}
-                                      className="hover:text-rose-400 cursor-pointer"
-                                    >
-                                      <X size={11} />
-                                    </button>
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">Onde foi gasto?</label>
-                    <input
-                      type="text"
-                      placeholder="Ex: Carrefour, Restaurante..."
-                      value={expWhere}
-                      onChange={(e) => setExpWhere(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">Valor Total (R$)</label>
-                    <input
-                      type="text"
-                      placeholder="0,00"
-                      value={expAmount}
-                      onChange={(e) => setExpAmount(maskCurrencyInput(e.target.value))}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm font-semibold"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1 cursor-default">Categoria</label>
-                    <div className="relative group">
-                      <select
-                        value={expCategory}
-                        onChange={(e) => setExpCategory(e.target.value)}
-                        style={{ colorScheme: darkMode ? "dark" : "light" }}
-                        className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-emerald-500/60 focus:outline-none focus:border-emerald-500"
-                      >
-                        {customCategories.map((cat) => (
-                          <option key={cat} value={cat} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                            {cat}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={16}
-                        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-emerald-400 transition"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1 cursor-default">Forma de Pagamento</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => { setExpPaymentMethod("pix"); setExpCreditCardId(""); setExpInstallments(1); }}
-                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "pix" ? "bg-emerald-500 text-white border-emerald-500 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
-                      >
-                        Pix
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setExpPaymentMethod("debito"); setExpCreditCardId(""); setExpInstallments(1); }}
-                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "debito" ? "bg-blue-500 text-white border-blue-500 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
-                      >
-                        Débito
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setExpPaymentMethod("credito")}
-                        className={`py-2 px-2 rounded-lg text-xs font-semibold border transition cursor-pointer flex items-center justify-center ${expPaymentMethod === "credito" ? "bg-purple-600 text-white border-purple-600 shadow-sm" : "border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300"}`}
-                      >
-                        Crédito
-                      </button>
-                    </div>
-                  </div>
-
-                  {expPaymentMethod === "credito" && (
-                    <div className="p-3 rounded-xl bg-purple-500/5 border border-purple-500/20 space-y-2.5">
-                      <div>
-                        <label className="block text-xs text-slate-500 mb-1 cursor-default">Selecione o Cartão</label>
-                        <div className="relative group">
-                          <select
-                            value={expCreditCardId}
-                            onChange={(e) => setExpCreditCardId(e.target.value)}
-                            required
-                            style={{ colorScheme: darkMode ? "dark" : "light" }}
-                            className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
-                          >
-                            <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">-- Escolha o Cartão --</option>
-                            {cards.map((c) => (
-                              <option key={c.id} value={c.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                                {c.name} (Lim: {formatBRL(c.limit)})
-                              </option>
-                            ))}
-                          </select>
-                          <ChevronDown
-                            size={16}
-                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-xs text-slate-500 mb-1 cursor-default">Parcelas</label>
-                        <div className="relative group">
-                          <select
-                            value={expInstallments}
-                            onChange={(e) => setExpInstallments(Number(e.target.value))}
-                            style={{ colorScheme: darkMode ? "dark" : "light" }}
-                            className="w-full appearance-none pl-3 pr-9 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/90 text-slate-900 dark:text-white text-sm cursor-pointer transition hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-purple-500/60 focus:outline-none focus:border-purple-500"
-                          >
-                            {Array.from({ length: 24 }, (_, i) => i + 1).map((n) => (
-                              <option key={n} value={n} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
-                                {n}x {n > 1 ? `de ${formatBRL(parseMaskedCurrency(expAmount) / n)}` : "(À vista)"}
-                              </option>
-                            ))}
-                          </select>
-                          <ChevronDown
-                            size={16}
-                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 group-hover:text-purple-400 transition"
-                          />
-                        </div>
-                      </div>
-                      {selectedExpenseCardObj && (
-                        <div
-                          className={`p-2.5 rounded-lg border text-[11px] cursor-default ${
-                            isSelectedExpenseCardClosed
-                              ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                              : "bg-amber-500/10 border-amber-500/30 text-amber-300"
-                          }`}
-                        >
-                          {isSelectedExpenseCardClosed ? (
-                            <>
-                              A fatura do <strong>{selectedExpenseCardObj.name}</strong> fechou dia{" "}
-                              <strong>{selectedExpenseCardObj.closingDay || 1}</strong> (vence dia{" "}
-                              <strong>{selectedExpenseCardObj.dueDay || 10}</strong>). Esta compra ocupará o limite agora, mas a{" "}
-                              <strong>1ª parcela só virá no próximo mês ({getCycleLabel(expectedExpenseStartCycle)})</strong>.
-                            </>
-                          ) : (
-                            <>
-                              Fatura aberta (fecha dia <strong>{selectedExpenseCardObj.closingDay || 1}</strong> • vence dia{" "}
-                              <strong>{selectedExpenseCardObj.dueDay || 10}</strong>). A 1ª parcela será cobrada na fatura deste mês.
-                            </>
-                          )}
-                        </div>
-                      )}
-                      {matchedCardPurchase && (
-                        <div className="p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/30 text-[11px] text-purple-300 cursor-default">
-                          Compra única detectada em <strong>{matchedCardPurchase.where}</strong> ({expInstallments}x): este item será agrupado junto com <strong>{matchedCardPurchase.what}</strong> no histórico sem descontar o limite novamente.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium flex items-center justify-center gap-1.5 cursor-pointer transition mt-2"
-                  >
-                    <Plus size={16} /> Lançar Gasto
-                  </button>
-                </form>
-              </section>
-            </div>
-
-            {/* 2. HISTÓRICO DE GASTOS, TOTAL E PARCELAS */}
-            <div className="lg:col-span-7 flex flex-col">
-              <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex-1 flex flex-col h-full min-h-[420px]">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-2 text-amber-500 cursor-default">
-                    <Layers size={20} />
-                    <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Histórico de Gastos, Total e Parcelas</h2>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowOnlyActiveInCycle(!showOnlyActiveInCycle)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium border cursor-pointer transition ${
-                      showOnlyActiveInCycle
-                        ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
-                        : "border-slate-300 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    {showOnlyActiveInCycle ? "Mostrando: Ativos no Mês" : "Mostrar apenas ativos no mês"}
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto overflow-y-auto flex-1 max-h-[380px]">
-                  <table className="w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 text-xs">
-                        <th className="py-2 cursor-default">O que foi gasto</th>
-                        <th className="py-2 cursor-default">Onde</th>
-                        <th className="py-2 cursor-default">Categoria</th>
-                        <th className="py-2 cursor-default">Pagamento</th>
-                        <th className="py-2 cursor-default">Ciclo / Parcelas</th>
-                        <th className="py-2 cursor-default">Total</th>
-                        <th className="py-2 text-right cursor-default">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                      {displayedExpenses.length === 0 ? (
-                        <tr>
-                          <td colSpan={7} className="py-6 text-center text-xs text-slate-500 cursor-default">
-                            Nenhum gasto registrado para este ciclo.
-                          </td>
-                        </tr>
-                      ) : (
-                        displayedExpenses.map((exp) => {
-                          const cycleInfo = getExpenseCycleStatus(exp, currentCycle);
-                          const isPaid = cycleInfo.status === "paid";
-                          const isFuture = cycleInfo.status === "future";
-                          return (
-                            <tr key={exp.id} className={isPaid ? "opacity-50" : ""}>
-                              <td className={`py-3 font-medium cursor-default ${isPaid ? "line-through text-slate-400" : ""}`}>
-                                {exp.what}
-                              </td>
-                              <td className="py-3 text-slate-500 cursor-default">{exp.where}</td>
-                              <td className="py-3 cursor-default">
-                                <span className="px-2 py-0.5 rounded text-xs bg-slate-200 dark:bg-slate-800 cursor-default">
-                                  {exp.category || "Geral"}
-                                </span>
-                              </td>
-                              <td className="py-3 cursor-default">{exp.paymentLabel}</td>
-                              <td className="py-3 cursor-default">
-                                {isPaid ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-semibold text-[11px]">
-                                    <CheckCircle2 size={12} /> Quitado ({cycleInfo.totalInstallments}/{cycleInfo.totalInstallments})
-                                  </span>
-                                ) : isFuture ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 font-medium text-[11px]">
-                                    Próx. Fatura ({cycleInfo.totalInstallments}x de {formatBRL(exp.installmentValue)})
-                                  </span>
-                                ) : Number(exp.installments) > 1 ? (
-                                  <div>
-                                    <span className="font-bold text-amber-500">
-                                      {cycleInfo.currentInstallment}/{cycleInfo.totalInstallments}
-                                    </span>{" "}
-                                    de{" "}
-                                    <span className="font-medium cursor-default">
-                                      {formatBRL(exp.installmentValue)}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span className="cursor-default font-medium text-emerald-400">
-                                    1/1 (À vista)
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-3 font-bold cursor-default">
-                                {isPaid ? (
-                                  <span className="text-emerald-500 text-xs">R$ 0,00</span>
-                                ) : (
-                                  <div>
-                                    <span>{formatBRL(cycleInfo.remainingAmount)}</span>
-                                    {Number(exp.installments) > 1 && cycleInfo.currentInstallment > 1 && (
-                                      <span className="block text-[10px] font-normal text-slate-400">
-                                        de {formatBRL(exp.totalAmount)}
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="py-3 text-right space-x-2">
-                                <button
-                                  onClick={() => startEditExpense(exp)}
-                                  className="text-slate-400 hover:text-amber-500 cursor-pointer"
-                                  title="Editar gasto"
-                                >
-                                  <Pencil size={14} />
-                                </button>
-                                <button
-                                  onClick={() => handleRemoveExpense(exp.id)}
-                                  className="text-slate-400 hover:text-red-500 cursor-pointer"
-                                  title="Excluir gasto"
-                                >
-                                  <Trash2 size={15} />
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            </div>
-
-          </div>
-
-          {/* PARTE INFERIOR: DESPESAS FIXAS */}
-          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2 text-blue-500 cursor-default">
-                <Home size={20} />
-                <h2 className="font-bold text-slate-900 dark:text-white cursor-default">Despesas Fixas</h2>
-              </div>
-              <span className="text-sm font-semibold text-slate-500 cursor-default">{formatBRL(totalFixed)}</span>
-            </div>
-
-            <form onSubmit={handleAddFixed} className="flex flex-col sm:flex-row gap-2 mb-4">
-              <input
-                type="text"
-                placeholder="Aluguel, Luz, Academia..."
-                value={fixedName}
-                onChange={(e) => setFixedName(e.target.value)}
-                className="w-full sm:flex-1 min-w-0 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-              />
-              <div className="flex gap-2 w-full sm:w-auto">
-                <input
-                  type="text"
-                  placeholder="Valor (R$)"
-                  value={fixedAmount}
-                  onChange={(e) => setFixedAmount(maskCurrencyInput(e.target.value))}
-                  className="flex-1 sm:w-32 min-w-0 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
-                />
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium cursor-pointer flex items-center justify-center gap-1 shrink-0"
-                >
-                  <Plus size={16} /> Adicionar
-                </button>
-              </div>
-            </form>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {fixedExpenses.length === 0 ? (
-                <p className="text-xs text-slate-500 col-span-full py-2 cursor-default">Nenhuma despesa fixa cadastrada.</p>
-              ) : (
-                fixedExpenses.map((item) => (
-                  <div key={item.id} className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-sm">
-                    {editingFixedId === item.id ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={editFixedName}
-                          onChange={(e) => setEditFixedName(e.target.value)}
-                          className="flex-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                        />
-                        <input
-                          type="text"
-                          value={editFixedAmount}
-                          onChange={(e) => setEditFixedAmount(maskCurrencyInput(e.target.value))}
-                          className="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                        />
-                        <button onClick={() => handleSaveFixedEdit(item.id)} className="text-emerald-500 cursor-pointer" title="Salvar">
-                          <Check size={16} />
-                        </button>
-                        <button onClick={() => setEditingFixedId(null)} className="text-slate-400 cursor-pointer" title="Cancelar">
-                          <X size={16} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between">
-                        <span className="cursor-default font-medium">{item.name}</span>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-900 dark:text-white cursor-default">
-                            {formatBRL(item.amount)}
-                          </span>
-                          <button
-                            onClick={() => startEditFixed(item)}
-                            className="text-slate-400 hover:text-blue-500 cursor-pointer"
-                            title="Editar despesa"
-                          >
-                            <Pencil size={14} />
-                          </button>
-                          <button
-                            onClick={() => handleRemoveFixed(item.id)}
-                            className="text-slate-400 hover:text-red-500 cursor-pointer"
-                            title="Excluir despesa"
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-
-        </main>
+        </div>
       )}
     </div>
   );
