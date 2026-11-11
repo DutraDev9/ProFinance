@@ -27,6 +27,62 @@ import {
   Users,
   UserCheck
 } from 'lucide-react';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updatePassword,
+  reauthenticateWithPopup,
+  EmailAuthProvider,
+  linkWithCredential,
+  signOut
+} from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+
+// ==========================================
+// CONFIGURAÇÃO E INICIALIZAÇÃO DO FIREBASE
+// ==========================================
+const getFirebaseConfig = () => {
+  if (typeof window !== 'undefined' && window.__FIREBASE_CONFIG__) {
+    return window.__FIREBASE_CONFIG__;
+  }
+  return {
+    apiKey: 'AIzaSyDemoKey-ConfigureSuaChaveNoProjeto',
+    authDomain: 'controle-financeiro.firebaseapp.com',
+    projectId: 'controle-financeiro',
+    storageBucket: 'controle-financeiro.appspot.com',
+    messagingSenderId: '000000000000',
+    appId: '1:000000000000:web:000000000000'
+  };
+};
+
+let firebaseApp = null;
+let firebaseAuth = null;
+let firestoreDb = null;
+let googleProvider = null;
+
+try {
+  const cfg = getFirebaseConfig();
+  firebaseApp = !getApps().length ? initializeApp(cfg) : getApp();
+  firebaseAuth = getAuth(firebaseApp);
+  firestoreDb = getFirestore(firebaseApp);
+  googleProvider = new GoogleAuthProvider();
+} catch (err) {
+  console.warn('Modo local ativo (Firebase aguardando credenciais de produção):', err);
+}
+
+const isFirebaseConfigured = () => {
+  const cfg = getFirebaseConfig();
+  return Boolean(
+    firebaseAuth &&
+      firestoreDb &&
+      cfg?.apiKey &&
+      !String(cfg.apiKey).includes('AIzaSyDemoKey')
+  );
+};
 
 // ==========================================
 // UTILITÁRIOS DE MOEDA E CICLOS
@@ -182,47 +238,49 @@ export default function App() {
   // ==========================================
   // ESTADOS DE AUTENTICAÇÃO E USUÁRIOS
   // ==========================================
-  const [usersDb, setUsersDb] = useState(() => {
-    const defaultUsers = {
-      'dumaster@teste.com': {
-        email: 'dumaster@teste.com',
-        name: 'SuperAdmin',
-        password: 'admin',
-        role: 'superadmin'
-      },
-      'andreydutraa@gmail.com': {
-        email: 'andreydutraa@gmail.com',
-        name: 'Andrey Dutra',
-        password: '123456',
-        role: 'user'
-      }
-    };
+  const DEFAULT_USERS_DB = {
+    'dumaster@teste.com': {
+      email: 'dumaster@teste.com',
+      name: 'SuperAdmin',
+      password: 'admin',
+      role: 'superadmin'
+    },
+    'andreydutraa@gmail.com': {
+      email: 'andreydutraa@gmail.com',
+      name: 'Andrey Dutra',
+      password: '123456',
+      role: 'user'
+    }
+  };
+
+  const getLatestUsersDb = (fallbackState) => {
     try {
       const saved = localStorage.getItem('cf_users_db_v5');
       if (saved) {
         const parsed = JSON.parse(saved);
-        return { ...defaultUsers, ...parsed };
+        const merged = { ...DEFAULT_USERS_DB, ...(fallbackState || {}) };
+        Object.keys(parsed).forEach((k) => {
+          const cleanKey = k.trim().toLowerCase();
+          merged[cleanKey] = {
+            ...(merged[cleanKey] || {}),
+            ...parsed[k],
+            email: cleanKey
+          };
+        });
+        return merged;
       }
     } catch (e) {
       console.error(e);
     }
-    return defaultUsers;
-  });
+    return { ...DEFAULT_USERS_DB, ...(fallbackState || {}) };
+  };
+
+  const [usersDb, setUsersDb] = useState(() => getLatestUsersDb());
 
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('cf_current_user_v5');
       if (saved) return JSON.parse(saved);
-      // Recupera sessão anterior caso exista em chaves antigas do navegador
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.includes('user') && k !== 'cf_users_db_v5') {
-          try {
-            const val = JSON.parse(localStorage.getItem(k));
-            if (val && val.email && val.name) return val;
-          } catch (_) {}
-        }
-      }
     } catch (e) {
       return null;
     }
@@ -242,6 +300,7 @@ export default function App() {
   const [newDirectPassword, setNewDirectPassword] = useState('');
   const [confirmDirectPassword, setConfirmDirectPassword] = useState('');
   const [passwordModalMessage, setPasswordModalMessage] = useState({ type: '', text: '' });
+  const [isSavingPassword, setIsSavingPassword] = useState(false);
 
   // Seletor Prévia / Código e Painel de Usuários (exclusivo para superadmin)
   const [viewMode, setViewMode] = useState('preview'); // 'preview' | 'admin' | 'code'
@@ -340,6 +399,46 @@ export default function App() {
       console.error(e);
     }
   }, [usersDb]);
+
+  // Sincroniza os dados do usuário e a senha atualizada diretamente do Firestore ao abrir o app
+  useEffect(() => {
+    if (!currentUser?.email || !isFirebaseConfigured()) return;
+    const emailKey = currentUser.email.trim().toLowerCase();
+
+    const syncFromFirestore = async () => {
+      try {
+        const userRef = doc(firestoreDb, 'users', emailKey);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const remoteUser = userSnap.data();
+          setUsersDb((prev) => {
+            const next = {
+              ...prev,
+              [emailKey]: {
+                ...(prev[emailKey] || {}),
+                ...remoteUser,
+                email: emailKey
+              }
+            };
+            try {
+              localStorage.setItem('cf_users_db_v5', JSON.stringify(next));
+            } catch (_) {}
+            return next;
+          });
+
+          if (remoteUser.passwordUpdatedAt) {
+            setCurrentUser((prev) =>
+              prev ? { ...prev, passwordUpdatedAt: remoteUser.passwordUpdatedAt } : prev
+            );
+          }
+        }
+      } catch (err) {
+        console.warn('Não foi possível sincronizar usuário do Firestore:', err);
+      }
+    };
+
+    syncFromFirestore();
+  }, [currentUser?.email]);
 
   useEffect(() => {
     try {
@@ -576,6 +675,24 @@ export default function App() {
   const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
   const INACTIVITY_LIMIT_MS = 10 * 60 * 1000; // 10 minutos de inatividade para logout automático
 
+  const handleLogout = async (customMessage = '') => {
+    if (isFirebaseConfigured()) {
+      try {
+        await signOut(firebaseAuth);
+      } catch (_) {}
+    }
+    setCurrentUser(null);
+    setAuthPassword('');
+    setAuthError(customMessage || '');
+    setAuthSuccess('');
+    setShowPasswordModal(false);
+    setShowGooglePicker(false);
+    try {
+      localStorage.removeItem('cf_current_user_v5');
+      localStorage.removeItem('cf_last_activity_v5');
+    } catch (_) {}
+  };
+
   // Monitora atividade do usuário e faz logout automático após 10 minutos sem uso
   useEffect(() => {
     if (!currentUser) return;
@@ -583,12 +700,7 @@ export default function App() {
     let inactivityTimer;
 
     const handleInactivityLogout = () => {
-      setCurrentUser(null);
-      setAuthError('Sessão encerrada automaticamente após 10 minutos de inatividade.');
-      try {
-        localStorage.removeItem('cf_current_user_v5');
-        localStorage.removeItem('cf_last_activity_v5');
-      } catch (_) {}
+      handleLogout('Sessão encerrada automaticamente após 10 minutos de inatividade.');
     };
 
     const resetInactivityTimer = () => {
@@ -622,8 +734,9 @@ export default function App() {
   const getPasswordCooldownInfo = (userEmail) => {
     if (!userEmail) return { isLocked: false, remainingDays: 0, unlockDateStr: '' };
     const emailKey = userEmail.trim().toLowerCase();
-    const userRecord = usersDb[emailKey];
-    const lastChange = userRecord?.lastPasswordChange || currentUser?.lastPasswordChange || 0;
+    const latestDb = getLatestUsersDb(usersDb);
+    const userRecord = latestDb[emailKey];
+    const lastChange = userRecord?.passwordUpdatedAt || currentUser?.passwordUpdatedAt || 0;
     if (!lastChange) return { isLocked: false, remainingDays: 0, unlockDateStr: '' };
 
     const elapsed = Date.now() - Number(lastChange);
@@ -643,157 +756,290 @@ export default function App() {
     return { isLocked: true, remainingDays, unlockDateStr };
   };
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     setAuthError('');
     setAuthSuccess('');
     const emailClean = authEmail.trim().toLowerCase();
-    if (!emailClean || !authPassword) {
+    const typedPassword = authPassword.trim();
+
+    if (!emailClean || !typedPassword) {
       setAuthError('Preencha seu e-mail e senha.');
       return;
+    }
+
+    let latestDb = getLatestUsersDb(usersDb);
+
+    // Se o Firebase estiver ativo, busca primeiro os dados mais recentes da conta no Firestore
+    if (isFirebaseConfigured()) {
+      try {
+        const targetKey =
+          emailClean === 'dumaster' ? 'dumaster@teste.com' : emailClean;
+        const snap = await getDoc(doc(firestoreDb, 'users', targetKey));
+        if (snap.exists()) {
+          const remoteData = snap.data();
+          latestDb = {
+            ...latestDb,
+            [targetKey]: {
+              ...(latestDb[targetKey] || {}),
+              ...remoteData,
+              email: targetKey
+            }
+          };
+        }
+      } catch (_) {}
     }
 
     // Conta SuperAdmin (dumaster@teste.com) sempre garantida no sistema
     if (emailClean === 'dumaster@teste.com' || emailClean === 'dumaster') {
       const adminEmail = 'dumaster@teste.com';
-      const existingAdmin = usersDb[adminEmail];
+      const existingAdmin = latestDb[adminEmail];
 
-      // Se o SuperAdmin já tiver trocado a senha pelo painel (lastPasswordChange ativo), valida a nova senha
+      // Se o SuperAdmin já tiver trocado a senha pelo painel ou definido uma personalizada, valida rigorosamente
       if (
-        existingAdmin?.lastPasswordChange &&
+        (existingAdmin?.passwordUpdatedAt || existingAdmin?.customAdminPasswordSet) &&
         existingAdmin?.password &&
-        authPassword !== existingAdmin.password
+        typedPassword !== existingAdmin.password
       ) {
         setAuthError('Senha incorreta para o SuperAdmin.');
         return;
       }
 
-      const superAdminUser = {
+      const updatedAdminRecord = {
+        ...(existingAdmin || {}),
         email: adminEmail,
         name: existingAdmin?.name || 'SuperAdmin',
         role: 'superadmin',
-        lastPasswordChange: existingAdmin?.lastPasswordChange || null
+        password: existingAdmin?.passwordUpdatedAt ? existingAdmin.password : typedPassword,
+        customAdminPasswordSet: true,
+        passwordUpdatedAt: existingAdmin?.passwordUpdatedAt || null
       };
 
-      setUsersDb((prev) => {
-        const nextDb = {
-          ...prev,
-          [adminEmail]: {
-            ...superAdminUser,
-            password: authPassword
-          }
-        };
+      const nextDb = {
+        ...latestDb,
+        [adminEmail]: updatedAdminRecord
+      };
+
+      try {
+        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+      } catch (_) {}
+
+      if (isFirebaseConfigured()) {
         try {
-          localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+          await setDoc(doc(firestoreDb, 'users', adminEmail), updatedAdminRecord, { merge: true });
         } catch (_) {}
-        return nextDb;
+      }
+
+      setUsersDb(nextDb);
+      setAuthPassword('');
+      setCurrentUser({
+        email: adminEmail,
+        name: updatedAdminRecord.name,
+        role: 'superadmin',
+        passwordUpdatedAt: updatedAdminRecord.passwordUpdatedAt
       });
-      setCurrentUser(superAdminUser);
       return;
     }
 
-    const existing = usersDb[emailClean];
+    // Tenta autenticar no Firebase Auth caso esteja configurado
+    if (isFirebaseConfigured()) {
+      try {
+        await signInWithEmailAndPassword(firebaseAuth, emailClean, typedPassword);
+      } catch (fbErr) {
+        // Se falhar no Firebase Auth mas a senha bater com a atualizada no Firestore, sincroniza
+        const existingInFirestore = latestDb[emailClean];
+        if (
+          !existingInFirestore ||
+          String(existingInFirestore.password || '').trim() !== typedPassword
+        ) {
+          setAuthError('E-mail ou senha incorretos.');
+          return;
+        }
+      }
+    }
+
+    const existing = latestDb[emailClean];
 
     if (!existing) {
       setAuthError('Conta não encontrada. Cadastre-se ou entre com o Google.');
       return;
     }
 
-    // Se o usuário ainda estava com a senha padrão inicial e ainda não havia trocado, vincula a senha digitada
-    if (existing.lastPasswordChange && existing.password && existing.password !== authPassword) {
+    // Valida sempre a senha cadastrada/alterada do usuário sem sobrescrevê-la
+    if (String(existing.password || '').trim() !== typedPassword) {
       setAuthError('E-mail ou senha incorretos.');
       return;
     }
 
-    setUsersDb((prev) => {
-      const nextDb = {
-        ...prev,
-        [emailClean]: {
-          ...existing,
-          password: authPassword
-        }
-      };
-      try {
-        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
-      } catch (_) {}
-      return nextDb;
-    });
-
+    setUsersDb(latestDb);
+    setAuthPassword('');
     setCurrentUser({
       email: existing.email,
       name: existing.name,
       role: existing.role || 'user',
-      lastPasswordChange: existing.lastPasswordChange || null
+      passwordUpdatedAt: existing.passwordUpdatedAt || null
     });
   };
 
-  const handleRegister = (e) => {
+  const handleRegister = async (e) => {
     e.preventDefault();
     setAuthError('');
     setAuthSuccess('');
     const emailClean = authEmail.trim().toLowerCase();
-    if (!authName.trim() || !emailClean || !authPassword) {
+    const typedPassword = authPassword.trim();
+
+    if (!authName.trim() || !emailClean || !typedPassword) {
       setAuthError('Preencha nome, e-mail e senha para criar sua conta.');
       return;
+    }
+
+    if (typedPassword.length < 6) {
+      setAuthError('A senha deve ter pelo menos 6 caracteres (padrão Firebase).');
+      return;
+    }
+
+    const latestDb = getLatestUsersDb(usersDb);
+    const existing = latestDb[emailClean];
+
+    if (existing) {
+      setAuthError('Este e-mail já possui cadastro. Use a aba "Entrar com Senha" ou "Entrar com Google".');
+      return;
+    }
+
+    if (isFirebaseConfigured()) {
+      try {
+        await createUserWithEmailAndPassword(firebaseAuth, emailClean, typedPassword);
+      } catch (fbErr) {
+        if (fbErr?.code === 'auth/email-already-in-use') {
+          setAuthError('Este e-mail já está cadastrado no Firebase. Faça login.');
+          return;
+        }
+      }
     }
 
     const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
     const newUser = {
       email: emailClean,
       name: authName.trim(),
-      password: authPassword,
+      password: typedPassword,
       role,
-      lastPasswordChange: null
+      passwordUpdatedAt: null
     };
 
-    setUsersDb((prev) => {
-      const nextDb = { ...prev, [emailClean]: newUser };
+    if (isFirebaseConfigured()) {
       try {
-        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+        await setDoc(doc(firestoreDb, 'users', emailClean), newUser, { merge: true });
       } catch (_) {}
-      return nextDb;
-    });
+    }
+
+    const nextDb = { ...latestDb, [emailClean]: newUser };
+    try {
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+    } catch (_) {}
+
+    setUsersDb(nextDb);
+    setAuthPassword('');
     setCurrentUser({
       email: newUser.email,
       name: newUser.name,
       role: newUser.role,
-      lastPasswordChange: null
+      passwordUpdatedAt: null
     });
   };
 
-  const handleSelectGoogleAccount = (account) => {
-    const emailClean = account.email.toLowerCase();
+  const handleSelectGoogleAccount = async (account) => {
+    const emailClean = account.email.trim().toLowerCase();
     const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
-    const existing = usersDb[emailClean];
+    let latestDb = getLatestUsersDb(usersDb);
+
+    if (isFirebaseConfigured()) {
+      try {
+        const snap = await getDoc(doc(firestoreDb, 'users', emailClean));
+        if (snap.exists()) {
+          latestDb = {
+            ...latestDb,
+            [emailClean]: {
+              ...(latestDb[emailClean] || {}),
+              ...snap.data(),
+              email: emailClean
+            }
+          };
+        }
+      } catch (_) {}
+    }
+
+    const existing = latestDb[emailClean];
+
+    // Preserva sempre a senha atual salva no banco/Firestore (nunca sobrescreve ao fazer login com Google)
+    let finalPassword = existing?.password || '123456';
+    let finalPasswordUpdatedAt = existing?.passwordUpdatedAt || null;
+
+    // Apenas se estiver na aba de Registro, tiver digitado uma senha nova (>= 6 chars) e não estiver bloqueado pelo limite de 30 dias
+    const cooldown = getPasswordCooldownInfo(emailClean);
+    if (authMode === 'register' && authPassword.trim().length >= 6 && !cooldown.isLocked) {
+      finalPassword = authPassword.trim();
+      finalPasswordUpdatedAt = Date.now();
+    }
 
     const updatedUser = {
+      ...(existing || {}),
       email: emailClean,
       name: account.name || existing?.name || 'Usuário Google',
-      password: authPassword || existing?.password || '123456',
+      password: finalPassword,
       role,
-      lastPasswordChange: existing?.lastPasswordChange || null
+      passwordUpdatedAt: finalPasswordUpdatedAt
     };
 
-    setUsersDb((prev) => {
-      const nextDb = { ...prev, [emailClean]: updatedUser };
+    if (isFirebaseConfigured()) {
       try {
-        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+        await setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true });
       } catch (_) {}
-      return nextDb;
-    });
+    }
+
+    const nextDb = { ...latestDb, [emailClean]: updatedUser };
+    try {
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+    } catch (_) {}
+
+    setUsersDb(nextDb);
+    setAuthPassword('');
     setShowGooglePicker(false);
     setCurrentUser({
       email: updatedUser.email,
       name: updatedUser.name,
       role: updatedUser.role,
-      lastPasswordChange: updatedUser.lastPasswordChange
+      passwordUpdatedAt: updatedUser.passwordUpdatedAt
     });
   };
 
-  const handleSaveDirectPassword = (e) => {
+  const handleGoogleButtonClick = async () => {
+    setAuthError('');
+    if (isFirebaseConfigured()) {
+      try {
+        const result = await signInWithPopup(firebaseAuth, googleProvider);
+        if (result?.user?.email) {
+          if (authMode === 'register' && authPassword.trim().length >= 6) {
+            try {
+              await updatePassword(result.user, authPassword.trim());
+            } catch (_) {}
+          }
+          await handleSelectGoogleAccount({
+            email: result.user.email,
+            name: result.user.displayName || result.user.email.split('@')[0]
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn('Fallback seletor Google:', err);
+      }
+    }
+    setShowGooglePicker(true);
+  };
+
+  const handleSaveDirectPassword = async (e) => {
     e.preventDefault();
     setPasswordModalMessage({ type: '', text: '' });
-    if (!currentUser) return;
+    if (!currentUser || isSavingPassword) return;
 
     const emailKey = currentUser.email.trim().toLowerCase();
     const cooldown = getPasswordCooldownInfo(emailKey);
@@ -807,15 +1053,15 @@ export default function App() {
     }
 
     const cleanPassword = newDirectPassword.trim();
-    if (cleanPassword.length < 4) {
+    if (cleanPassword.length < 6) {
       setPasswordModalMessage({
         type: 'error',
-        text: 'A nova senha deve ter pelo menos 4 caracteres.'
+        text: 'A nova senha deve ter pelo menos 6 caracteres (exigência do Firebase Auth).'
       });
       return;
     }
 
-    if (confirmDirectPassword && cleanPassword !== confirmDirectPassword.trim()) {
+    if (cleanPassword !== confirmDirectPassword.trim()) {
       setPasswordModalMessage({
         type: 'error',
         text: 'A confirmação de senha não confere.'
@@ -823,47 +1069,92 @@ export default function App() {
       return;
     }
 
-    const nowTimestamp = Date.now();
-    const existingRecord = usersDb[emailKey] || {
+    const latestDb = getLatestUsersDb(usersDb);
+    const existingRecord = latestDb[emailKey] || {
       email: emailKey,
       name: currentUser.name,
       role: currentUser.role || 'user'
     };
 
-    const updatedRecord = {
-      ...existingRecord,
-      email: emailKey,
-      password: cleanPassword,
-      lastPasswordChange: nowTimestamp
-    };
-
-    const nextUsersDb = {
-      ...usersDb,
-      [emailKey]: updatedRecord
-    };
-
-    const nextCurrentUser = {
-      ...currentUser,
-      email: emailKey,
-      lastPasswordChange: nowTimestamp
-    };
-
-    setUsersDb(nextUsersDb);
-    setCurrentUser(nextCurrentUser);
-
-    try {
-      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextUsersDb));
-      localStorage.setItem('cf_current_user_v5', JSON.stringify(nextCurrentUser));
-    } catch (err) {
-      console.error(err);
+    if (existingRecord.password && String(existingRecord.password).trim() === cleanPassword) {
+      setPasswordModalMessage({
+        type: 'error',
+        text: 'A nova senha deve ser diferente da senha atual.'
+      });
+      return;
     }
 
-    setNewDirectPassword('');
-    setConfirmDirectPassword('');
-    setPasswordModalMessage({
-      type: 'success',
-      text: 'Senha alterada e salva com sucesso! Próxima alteração disponível após 1 mês (30 dias).'
-    });
+    setIsSavingPassword(true);
+
+    try {
+      // 1. Atualiza automaticamente no Firebase Authentication (se o usuário estiver autenticado no Firebase)
+      if (isFirebaseConfigured() && firebaseAuth?.currentUser) {
+        try {
+          await updatePassword(firebaseAuth.currentUser, cleanPassword);
+        } catch (fbAuthErr) {
+          if (fbAuthErr?.code === 'auth/requires-recent-login' && googleProvider) {
+            // Reautentica automaticamente com o Google e aplica a nova senha no Firebase Auth
+            await reauthenticateWithPopup(firebaseAuth.currentUser, googleProvider);
+            await updatePassword(firebaseAuth.currentUser, cleanPassword);
+          } else if (fbAuthErr?.code === 'auth/Operation-not-allowed') {
+            console.warn('Provedor de senha no Firebase Auth:', fbAuthErr);
+          }
+        }
+      }
+
+      const nowTimestamp = Date.now();
+
+      const updatedRecord = {
+        ...existingRecord,
+        email: emailKey,
+        name: currentUser.name || existingRecord.name,
+        role: currentUser.role || existingRecord.role || 'user',
+        password: cleanPassword,
+        customAdminPasswordSet: true,
+        passwordUpdatedAt: nowTimestamp
+      };
+
+      // 2. Salva automaticamente no Cloud Firestore (coleção 'users')
+      if (isFirebaseConfigured()) {
+        await setDoc(doc(firestoreDb, 'users', emailKey), updatedRecord, { merge: true });
+      }
+
+      // 3. Atualiza o banco local e a sessão ativa
+      const nextUsersDb = {
+        ...latestDb,
+        [emailKey]: updatedRecord
+      };
+
+      const nextCurrentUser = {
+        ...currentUser,
+        email: emailKey,
+        passwordUpdatedAt: nowTimestamp
+      };
+
+      try {
+        localStorage.setItem('cf_users_db_v5', JSON.stringify(nextUsersDb));
+        localStorage.setItem('cf_current_user_v5', JSON.stringify(nextCurrentUser));
+      } catch (err) {
+        console.error(err);
+      }
+
+      setUsersDb(nextUsersDb);
+      setCurrentUser(nextCurrentUser);
+      setAuthPassword('');
+      setNewDirectPassword('');
+      setConfirmDirectPassword('');
+      setPasswordModalMessage({
+        type: 'success',
+        text: 'Senha atualizada automaticamente no Firebase e no sistema! Próxima alteração liberada em 30 dias.'
+      });
+    } catch (error) {
+      setPasswordModalMessage({
+        type: 'error',
+        text: 'Erro ao sincronizar senha com o Firebase. Tente novamente.'
+      });
+    } finally {
+      setIsSavingPassword(false);
+    }
   };
 
   // ==========================================
@@ -1389,7 +1680,7 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setShowGooglePicker(true)}
+            onClick={handleGoogleButtonClick}
             className="w-full py-2.5 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-slate-200 font-medium text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer"
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24">
@@ -1526,7 +1817,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setCurrentUser(null)}
+                onClick={() => handleLogout()}
                 className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
                 title="Sair"
               >
@@ -1670,7 +1961,7 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setCurrentUser(null)}
+              onClick={() => handleLogout()}
               className="hidden sm:flex p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
               title="Sair"
             >
@@ -2775,9 +3066,10 @@ export default function App() {
 
             {(() => {
               const cooldown = getPasswordCooldownInfo(currentUser.email);
+              const showLockWarning = cooldown.isLocked && passwordModalMessage.type !== 'success';
               return (
                 <>
-                  {cooldown.isLocked && (
+                  {showLockWarning && (
                     <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                       <div>
@@ -2810,14 +3102,16 @@ export default function App() {
 
                   <form onSubmit={handleSaveDirectPassword} className="space-y-3">
                     <div>
-                      <label className="block text-[11px] text-slate-400 mb-1">Nova Senha</label>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Nova Senha (mín. 6 caracteres)
+                      </label>
                       <input
                         type="password"
-                        disabled={cooldown.isLocked}
+                        disabled={cooldown.isLocked || isSavingPassword}
                         value={newDirectPassword}
                         onChange={(e) => setNewDirectPassword(e.target.value)}
                         placeholder={
-                          cooldown.isLocked ? 'Bloqueado por 30 dias' : 'Digite sua nova senha'
+                          cooldown.isLocked ? 'Bloqueado por 30 dias' : 'Mínimo de 6 caracteres'
                         }
                         className="w-full bg-[#090d16] disabled:opacity-50 border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
                         autoFocus={!cooldown.isLocked}
@@ -2830,7 +3124,7 @@ export default function App() {
                       </label>
                       <input
                         type="password"
-                        disabled={cooldown.isLocked}
+                        disabled={cooldown.isLocked || isSavingPassword}
                         value={confirmDirectPassword}
                         onChange={(e) => setConfirmDirectPassword(e.target.value)}
                         placeholder={
@@ -2850,10 +3144,10 @@ export default function App() {
                       </button>
                       <button
                         type="submit"
-                        disabled={cooldown.isLocked}
+                        disabled={cooldown.isLocked || isSavingPassword}
                         className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold text-white cursor-pointer"
                       >
-                        Salvar Nova Senha
+                        {isSavingPassword ? 'Sincronizando Firebase...' : 'Salvar Nova Senha'}
                       </button>
                     </div>
                   </form>
