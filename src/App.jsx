@@ -106,7 +106,7 @@ const DEFAULT_CATEGORIES = [
 
 export default function App() {
   // ==========================================
-  // FAVICON DE CARTEIRA NA ABA DO NAVEGADOR
+  // FAVICON, THEME-COLOR E FUNDO GLOBAL MOBILE
   // ==========================================
   useEffect(() => {
     const svgFavicon = `
@@ -125,6 +125,58 @@ export default function App() {
     }
     link.href = encoded;
     document.title = 'Controle Financeiro';
+
+    // Define a cor da barra de status e navegador no celular (iOS Safari / Chrome Android)
+    let metaTheme = document.querySelector("meta[name='theme-color']");
+    if (!metaTheme) {
+      metaTheme = document.createElement('meta');
+      metaTheme.name = 'theme-color';
+      document.head.appendChild(metaTheme);
+    }
+    metaTheme.content = '#070b14';
+
+    let metaStatus = document.querySelector("meta[name='apple-mobile-web-app-status-bar-style']");
+    if (!metaStatus) {
+      metaStatus = document.createElement('meta');
+      metaStatus.name = 'apple-mobile-web-app-status-bar-style';
+      document.head.appendChild(metaStatus);
+    }
+    metaStatus.content = 'black-translucent';
+
+    let metaViewport = document.querySelector("meta[name='viewport']");
+    if (!metaViewport) {
+      metaViewport = document.createElement('meta');
+      metaViewport.name = 'viewport';
+      document.head.appendChild(metaViewport);
+    }
+    metaViewport.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+
+    // Sobrescreve qualquer fundo branco padrão do navegador/Vite no modo claro do celular
+    let globalStyle = document.getElementById('cf-mobile-fix-style');
+    if (!globalStyle) {
+      globalStyle = document.createElement('style');
+      globalStyle.id = 'cf-mobile-fix-style';
+      document.head.appendChild(globalStyle);
+    }
+    globalStyle.innerHTML = `
+      :root, html, body, #root {
+        background-color: #070b14 !important;
+        color: #f1f5f9 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-height: 100% !important;
+        min-height: 100dvh !important;
+        overflow-x: hidden !important;
+        color-scheme: dark !important;
+        display: block !important;
+      }
+      body {
+        overscroll-behavior-y: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+    `;
   }, []);
 
   // ==========================================
@@ -1220,7 +1272,8 @@ export default function App() {
   // ==========================================
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-[#070b14] text-slate-100 flex items-center justify-center p-4 select-none cursor-default">
+      <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[#070b14] text-slate-100 flex items-center justify-center p-4 select-none cursor-default relative">
+        <div className="fixed inset-0 bg-[#070b14] -z-10 pointer-events-none" />
         <div className="w-full max-w-md bg-[#0f172a] border border-slate-800/80 rounded-2xl p-6 sm:p-8 shadow-2xl">
           <div className="flex items-center gap-3 mb-6">
             <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
@@ -1418,46 +1471,87 @@ export default function App() {
   // DASHBOARD PRINCIPAL
   // ==========================================
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 select-none cursor-default pb-12">
+    <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[#070b14] text-slate-100 select-none cursor-default pb-28 sm:pb-12 relative">
+      {/* Camada fixa para impedir fundo branco no overscroll do iOS/Android */}
+      <div className="fixed inset-0 bg-[#070b14] -z-10 pointer-events-none" />
+
       {/* HEADER */}
-      <header className="border-b border-slate-800/80 bg-[#0b1120]/90 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <Wallet className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-lg font-bold text-white tracking-tight">
-                  Controle Financeiro
-                </h1>
-                {isSuperAdmin && (
-                  <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-                    <Shield className="w-3 h-3" /> SuperAdmin
-                  </span>
-                )}
+      <header className="border-b border-slate-800/80 bg-[#0b1120]/95 backdrop-blur sticky top-0 z-30 w-full">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 py-3 flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2.5 sm:gap-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                <Wallet className="w-5 h-5" />
               </div>
-              <p className="text-xs text-slate-400">Olá, {currentUser.name}</p>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-sm sm:text-lg font-bold text-white tracking-tight truncate">
+                    Controle Financeiro
+                  </h1>
+                  {isSuperAdmin && (
+                    <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1 shrink-0">
+                      <Shield className="w-3 h-3" /> SuperAdmin
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-400 truncate">Olá, {currentUser.name}</p>
+              </div>
+            </div>
+
+            {/* Ações rápidas visíveis na primeira linha no celular */}
+            <div className="flex sm:hidden items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => pdfInputRef.current && pdfInputRef.current.click()}
+                disabled={isReadingPdf}
+                className="px-2.5 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{isReadingPdf ? 'Lendo...' : 'Fatura PDF'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setPasswordModalMessage({ type: '', text: '' });
+                  setNewDirectPassword('');
+                  setConfirmDirectPassword('');
+                  setShowPasswordModal(true);
+                }}
+                className="p-2 rounded-xl bg-[#0f172a] hover:bg-slate-800 border border-slate-800 text-slate-300 transition cursor-pointer"
+                title="Trocar Senha de Acesso"
+              >
+                <Lock className="w-3.5 h-3.5 text-emerald-400" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCurrentUser(null)}
+                className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
+                title="Sair"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
           {/* CONTROLES DO HEADER: CICLO MENSAL + LEITOR PDF + SUPERADMIN + LOGOUT */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
             {/* Navegador Dinâmico de Ciclos (Mês Anterior / Mês Atual / Virar Mês) */}
-            <div className="flex flex-wrap items-center gap-1.5 bg-[#0f172a] border border-slate-800 rounded-xl p-1.5 shadow-inner">
+            <div className="flex flex-wrap items-center justify-between flex-1 sm:flex-initial gap-1 bg-[#0f172a] border border-slate-800 rounded-xl p-1 sm:p-1.5 shadow-inner min-w-0">
               <button
                 type="button"
                 onClick={() => setCurrentCycle((prev) => sanitizeCycle(prev) - 1)}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-200 hover:text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1 transition cursor-pointer shrink-0"
                 title="Voltar 1 Mês"
               >
                 <ChevronLeft className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Mês Anterior</span>
               </button>
 
-              <div className="px-3 py-0.5 text-center min-w-[140px]">
-                <div className="flex items-center justify-center gap-1.5">
-                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+              <div className="px-1.5 sm:px-3 py-0.5 text-center min-w-[110px] sm:min-w-[140px] flex-1 sm:flex-initial">
+                <div className="flex items-center justify-center gap-1">
+                  <span className="text-[9px] sm:text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
                     {sanitizeCycle(currentCycle) === 0
                       ? 'Mês Atual'
                       : sanitizeCycle(currentCycle) > 0
@@ -1469,7 +1563,7 @@ export default function App() {
                         }`}
                   </span>
                 </div>
-                <span className="text-xs font-extrabold text-emerald-400 block leading-tight">
+                <span className="text-[11px] sm:text-xs font-extrabold text-emerald-400 block leading-tight truncate">
                   {getCycleLabel(currentCycle)}
                 </span>
               </div>
@@ -1477,7 +1571,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setCurrentCycle((prev) => sanitizeCycle(prev) + 1)}
-                className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-[11px] sm:text-xs font-semibold flex items-center gap-1 transition cursor-pointer shrink-0"
                 title="Avançar 1 Mês"
               >
                 <span>Virar Mês</span>
@@ -1488,7 +1582,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setCurrentCycle(0)}
-                  className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                  className="w-full sm:w-auto mt-1 sm:mt-0 px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 transition cursor-pointer"
                   title="Retornar imediatamente para o mês atual"
                 >
                   <Calendar className="w-3.5 h-3.5" />
@@ -1497,7 +1591,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Botão Ler Fatura PDF */}
+            {/* Input oculto para leitura de PDF */}
             <input
               ref={pdfInputRef}
               type="file"
@@ -1505,17 +1599,18 @@ export default function App() {
               onChange={handlePdfUpload}
               className="hidden"
             />
+
+            {/* Botões Desktop */}
             <button
               type="button"
               onClick={() => pdfInputRef.current && pdfInputRef.current.click()}
               disabled={isReadingPdf}
-              className="px-3 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+              className="hidden sm:flex px-3 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-xs font-semibold items-center gap-1.5 transition cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
               <span>{isReadingPdf ? 'Lendo PDF...' : 'Ler Fatura PDF'}</span>
             </button>
 
-            {/* Botão Definir/Trocar Senha Direta */}
             <button
               type="button"
               onClick={() => {
@@ -1524,20 +1619,20 @@ export default function App() {
                 setConfirmDirectPassword('');
                 setShowPasswordModal(true);
               }}
-              className="px-2.5 py-2 rounded-xl bg-[#0f172a] hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+              className="hidden sm:flex px-2.5 py-2 rounded-xl bg-[#0f172a] hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-medium items-center gap-1.5 transition cursor-pointer"
               title="Trocar Senha de Acesso"
             >
               <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Trocar Senha</span>
+              <span>Trocar Senha</span>
             </button>
 
             {/* Seletor Prévia / Usuários / Código APENAS para o SuperAdmin */}
             {isSuperAdmin && (
-              <div className="flex items-center bg-[#0f172a] p-1 rounded-xl border border-slate-800">
+              <div className="flex items-center justify-center w-full sm:w-auto bg-[#0f172a] p-1 rounded-xl border border-slate-800">
                 <button
                   type="button"
                   onClick={() => setViewMode('preview')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                  className={`flex-1 sm:flex-initial justify-center px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
                     viewMode === 'preview'
                       ? 'bg-slate-800 text-emerald-400'
                       : 'text-slate-400 hover:text-white'
@@ -1549,7 +1644,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setViewMode('admin')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                  className={`flex-1 sm:flex-initial justify-center px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
                     viewMode === 'admin'
                       ? 'bg-slate-800 text-amber-400'
                       : 'text-slate-400 hover:text-white'
@@ -1561,7 +1656,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setViewMode('code')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                  className={`flex-1 sm:flex-initial justify-center px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ${
                     viewMode === 'code'
                       ? 'bg-slate-800 text-emerald-400'
                       : 'text-slate-400 hover:text-white'
@@ -1576,7 +1671,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setCurrentUser(null)}
-              className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
+              className="hidden sm:flex p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 transition cursor-pointer"
               title="Sair"
             >
               <LogOut className="w-4 h-4" />
@@ -1586,7 +1681,7 @@ export default function App() {
       </header>
 
       {/* CONTEÚDO PRINCIPAL */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-6">
+      <main className="max-w-7xl mx-auto px-3 sm:px-6 pt-4 sm:pt-6 space-y-5 sm:space-y-6">
         {isSuperAdmin && viewMode === 'admin' ? (
           <div className="bg-[#0f172a] border border-amber-500/30 rounded-2xl p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4">
@@ -1964,7 +2059,7 @@ export default function App() {
                ========================================== */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
               {/* ESQUERDA: REGISTRAR NOVO GASTO */}
-              <div className="lg:col-span-4 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+              <div className="lg:col-span-4 min-w-0 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
                 <div>
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
@@ -2182,7 +2277,7 @@ export default function App() {
               </div>
 
               {/* DIREITA: HISTÓRICO DE GASTOS, TOTAL E PARCELAS (Altura fixa alinhada ao painel de registro) */}
-              <div className="lg:col-span-8 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between h-[480px] lg:h-auto shadow-lg">
+              <div className="lg:col-span-8 min-w-0 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between min-h-[320px] max-h-[460px] lg:max-h-none lg:h-auto shadow-lg">
                 <div className="flex flex-col h-full overflow-hidden">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
                     <div className="flex items-center gap-2">
