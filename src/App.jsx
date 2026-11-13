@@ -31,6 +31,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updatePassword,
@@ -103,6 +105,12 @@ const isFirebaseConfigured = () => {
       !String(cfg.apiKey).includes('AIzaSyDemoKey')
   );
 };
+
+if (!isFirebaseConfigured()) {
+  console.warn(
+    '[Firebase] Chave de API de demonstração em uso. Defina VITE_FIREBASE_* no .env e reinicie o servidor (npm run dev).'
+  );
+}
 
 // Executa promessas do Firestore com timeout curto para nunca travar o login
 const withTimeout = (promise, ms = 2000) =>
@@ -343,14 +351,6 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authSuccess, setAuthSuccess] = useState('');
-  const [showGooglePicker, setShowGooglePicker] = useState(false);
-  const [googlePopupStep, setGooglePopupStep] = useState('email'); // 'email' | 'password'
-  const [googleCustomEmail, setGoogleCustomEmail] = useState('');
-  const [googleCustomName, setGoogleCustomName] = useState('');
-  const [googleCustomPassword, setGoogleCustomPassword] = useState('');
-  const [showGooglePasswordText, setShowGooglePasswordText] = useState(false);
-  const [googleCustomError, setGoogleCustomError] = useState('');
-  const googlePopupWindowRef = useRef(null);
 
   // Estados de Gerenciamento de Contas pelo SuperAdmin
   const [adminEditingEmail, setAdminEditingEmail] = useState(null);
@@ -752,13 +752,9 @@ export default function App() {
     setAuthEmail('');
     setAuthPassword('');
     setAuthName('');
-    setGoogleCustomEmail('');
-    setGoogleCustomName('');
-    setGoogleCustomError('');
     setAuthError(customMessage || '');
     setAuthSuccess('');
     setShowPasswordModal(false);
-    setShowGooglePicker(false);
     try {
       localStorage.removeItem('cf_current_user_v5');
       localStorage.removeItem('cf_last_activity_v5');
@@ -1023,7 +1019,6 @@ export default function App() {
     const emailClean = account.email.trim().toLowerCase();
     const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
 
-    // Remove da lista de excluídos se estiver fazendo login/cadastro novamente
     try {
       const deletedList = getDeletedUsersList().filter((e) => e !== emailClean);
       localStorage.setItem('cf_deleted_users_v5', JSON.stringify(deletedList));
@@ -1037,11 +1032,7 @@ export default function App() {
         if (snap && snap.exists()) {
           latestDb = {
             ...latestDb,
-            [emailClean]: {
-              ...(latestDb[emailClean] || {}),
-              ...snap.data(),
-              email: emailClean
-            }
+            [emailClean]: { ...(latestDb[emailClean] || {}), ...snap.data(), email: emailClean }
           };
         }
       } catch (_) {}
@@ -1049,16 +1040,14 @@ export default function App() {
 
     const existing = latestDb[emailClean];
 
-    // Preserva sempre a senha atual salva no banco/Firestore (nunca sobrescreve ao fazer login com Google)
-    let finalPassword = existing?.password || '123456';
+    // Mantém a senha já existente; só define uma nova se veio do cadastro e não está em cooldown
+    let finalPassword = existing?.password || '';
     let finalPasswordUpdatedAt = existing?.passwordUpdatedAt || null;
 
     const cooldown = getPasswordCooldownInfo(emailClean);
-    if (authMode === 'register' && authPassword.trim().length >= 6 && !cooldown.isLocked) {
-      finalPassword = authPassword.trim();
+    if (account.password && String(account.password).length >= 6 && !cooldown.isLocked) {
+      finalPassword = String(account.password);
       finalPasswordUpdatedAt = Date.now();
-    } else if (!existing && account.password && String(account.password).trim().length >= 6) {
-      finalPassword = String(account.password).trim();
     }
 
     const resolvedName =
@@ -1070,9 +1059,9 @@ export default function App() {
       ...(existing || {}),
       email: emailClean,
       name: resolvedName,
-      password: finalPassword,
       role,
-      passwordUpdatedAt: finalPasswordUpdatedAt
+      passwordUpdatedAt: finalPasswordUpdatedAt,
+      ...(finalPassword ? { password: finalPassword } : {})
     };
 
     const nextDb = { ...latestDb, [emailClean]: updatedUser };
@@ -1080,21 +1069,8 @@ export default function App() {
       localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
     } catch (_) {}
 
-    if (googlePopupWindowRef.current && !googlePopupWindowRef.current.closed) {
-      try {
-        googlePopupWindowRef.current.close();
-      } catch (_) {}
-    }
-
     setUsersDb(nextDb);
     setAuthPassword('');
-    setShowGooglePicker(false);
-    setGooglePopupStep('email');
-    setGoogleCustomEmail('');
-    setGoogleCustomName('');
-    setGoogleCustomPassword('');
-    setShowGooglePasswordText(false);
-    setGoogleCustomError('');
     setCurrentUser({
       email: updatedUser.email,
       name: updatedUser.name,
@@ -1103,113 +1079,118 @@ export default function App() {
     });
 
     if (isFirebaseConfigured()) {
-      withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true }), 2500).catch(
-        () => {}
-      );
+      withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true }), 2500).catch(() => {});
     }
+  };
+
+  const GOOGLE_ERROR_MESSAGES = {
+    'auth/unauthorized-domain':
+      'Domínio não autorizado. Adicione este domínio em Firebase → Authentication → Settings → Authorized domains.',
+    'auth/operation-not-allowed':
+      'O provedor Google não está ativado. Ative em Firebase → Authentication → Sign-in method.',
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.':
+      'Chave de API do Firebase inválida. Confira o .env.',
+    'auth/invalid-api-key': 'Chave de API do Firebase inválida. Confira o .env.',
+    'auth/configuration-not-found':
+      'Authentication ainda não foi iniciado no projeto Firebase (clique em "Começar" no console).',
+    'auth/network-request-failed': 'Falha de rede. Verifique sua conexão.'
   };
 
   const handleGoogleButtonClick = async () => {
     setAuthError('');
     setAuthSuccess('');
-    setGoogleCustomError('');
-    setGoogleCustomEmail('');
-    setGoogleCustomPassword('');
-    setShowGooglePasswordText(false);
-    setGooglePopupStep('email');
 
-    const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
     const isSandboxPreview =
-      currentHost.includes('usercontent.goog') ||
-      currentHost.includes('webcontainer') ||
-      currentHost.includes('stackblitz');
+      host.includes('usercontent.goog') ||
+      host.includes('webcontainer') ||
+      host.includes('stackblitz');
 
-    // 1. Aciona o Popup Oficial do Google via Firebase Auth em domínios autorizados
-    if (!isSandboxPreview && firebaseAuth && googleProvider && isFirebaseConfigured()) {
-      try {
-        googleProvider.setCustomParameters({ prompt: 'select_account' });
-        const result = await signInWithPopup(firebaseAuth, googleProvider);
+    if (isSandboxPreview) {
+      setAuthError(
+        'O login com Google não funciona neste ambiente de preview. Rode em localhost ou no domínio publicado.'
+      );
+      return;
+    }
+
+    if (!isFirebaseConfigured()) {
+      console.error('[Google Login] Firebase não configurado. Host:', host);
+      setAuthError(
+        'Firebase não configurado: defina as variáveis VITE_FIREBASE_* no .env e reinicie o servidor.'
+      );
+      return;
+    }
+
+    try {
+      googleProvider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      const user = result?.user;
+      if (!user?.email) {
+        setAuthError('O Google não retornou um e-mail para esta conta.');
+        return;
+      }
+
+      let newPassword = null;
+      if (authMode === 'register' && authPassword.trim().length >= 6) {
+        try {
+          await updatePassword(user, authPassword.trim());
+          newPassword = authPassword.trim();
+        } catch (e) {
+          console.warn('Não foi possível vincular a senha:', e?.code);
+        }
+      }
+
+      await handleSelectGoogleAccount({
+        email: user.email,
+        name: user.displayName || user.email.split('@')[0],
+        password: newPassword
+      });
+    } catch (err) {
+      console.error('[Google Login] Erro:', err?.code, err?.message);
+
+      if (
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request'
+      ) {
+        return;
+      }
+
+      // Popup bloqueado (comum no celular): tenta o fluxo por redirecionamento
+      if (err?.code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(firebaseAuth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          console.error('[Google Login] Redirect falhou:', redirectErr?.code);
+        }
+      }
+
+      setAuthError(
+        GOOGLE_ERROR_MESSAGES[err?.code] ||
+          `Falha no login com Google (${err?.code || 'erro desconhecido'}).`
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!isFirebaseConfigured() || !firebaseAuth) return;
+    getRedirectResult(firebaseAuth)
+      .then((result) => {
         if (result?.user?.email) {
-          if (authMode === 'register' && authPassword.trim().length >= 6) {
-            try {
-              await updatePassword(result.user, authPassword.trim());
-            } catch (_) {}
-          }
-          await handleSelectGoogleAccount({
+          handleSelectGoogleAccount({
             email: result.user.email,
             name: result.user.displayName || result.user.email.split('@')[0]
           });
-          return;
         }
-      } catch (err) {
-        if (
-          err?.code === 'auth/popup-closed-by-user' ||
-          err?.code === 'auth/cancelled-popup-request'
-        ) {
-          return;
-        }
-      }
-    }
-
-    // 2. Abre o fluxo de Login do Google em 2 etapas (E-mail -> Senha)
-    setShowGooglePicker(true);
-  };
-
-  const handleGoogleEmailStepSubmit = (e) => {
-    e.preventDefault();
-    setGoogleCustomError('');
-    const cleanEmail = googleCustomEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setGoogleCustomError('Digite um endereço de e-mail válido.');
-      return;
-    }
-    setGoogleCustomEmail(cleanEmail);
-    setGooglePopupStep('password');
-  };
-
-  const handleGooglePasswordStepSubmit = async (e) => {
-    e.preventDefault();
-    setGoogleCustomError('');
-    const cleanEmail = googleCustomEmail.trim().toLowerCase();
-    const typedPass = googleCustomPassword.trim();
-
-    if (!typedPass) {
-      setGoogleCustomError('Digite uma senha.');
-      return;
-    }
-
-    const latestDb = getLatestUsersDb(usersDb);
-    const existing = latestDb[cleanEmail];
-
-    if (existing) {
-      const isDefaultUnchanged =
-        existing.email === 'andreydutraa@gmail.com' &&
-        !existing.passwordUpdatedAt &&
-        existing.password === '123456';
-
-      if (!isDefaultUnchanged && String(existing.password || '').trim() !== typedPass) {
-        setGoogleCustomError('Senha incorreta. Tente novamente.');
-        return;
-      }
-    } else if (typedPass.length < 6) {
-      setGoogleCustomError('A senha deve ter pelo menos 6 caracteres.');
-      return;
-    }
-
-    const displayName =
-      existing?.name ||
-      authName.trim() ||
-      cleanEmail
-        .split('@')[0]
-        .replace(/[._-]/g, ' ')
-        .replace(/\b\w/g, (l) => l.toUpperCase());
-
-    await handleSelectGoogleAccount({
-      email: cleanEmail,
-      name: displayName,
-      password: existing?.passwordUpdatedAt ? existing.password : typedPass
-    });
-  };
+      })
+      .catch((err) => {
+        console.error('[Google Redirect] Erro:', err?.code, err?.message);
+        setAuthError(
+          GOOGLE_ERROR_MESSAGES[err?.code] || `Falha no login com Google (${err?.code}).`
+        );
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ==========================================
   // HANDLERS DO PAINEL SUPERADMIN (EDITAR NOME E EXCLUIR CONTA)
@@ -1946,169 +1927,6 @@ export default function App() {
             </span>
           </button>
         </div>
-
-        {/* Janela Oficial de Login do Google em 2 Etapas (E-mail -> Senha) */}
-        {showGooglePicker && (
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 [color-scheme:light]">
-            <div className="w-full max-w-[400px] bg-white text-[#202124] rounded-[28px] p-7 sm:p-9 shadow-2xl border border-slate-200">
-              {/* Cabeçalho superior com ícone G do Google */}
-              <div className="flex items-center justify-between mb-5">
-                <svg className="w-7 h-7" viewBox="0 0 24 24">
-                  <path
-                    fill="#EA4335"
-                    d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
-                  />
-                  <path
-                    fill="#4285F4"
-                    d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"
-                  />
-                </svg>
-                <button
-                  type="button"
-                  onClick={() => setShowGooglePicker(false)}
-                  className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
-                  title="Fechar"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {googlePopupStep === 'email' ? (
-                <form onSubmit={handleGoogleEmailStepSubmit} className="space-y-5">
-                  <div>
-                    <h3 className="text-2xl font-normal text-[#202124]">Fazer login</h3>
-                    <p className="text-sm text-[#444746] mt-1.5">
-                      Prosseguir para <span className="font-medium text-[#0b57d0]">Controle Financeiro</span>
-                    </p>
-                  </div>
-
-                  <div>
-                    <input
-                      type="email"
-                      value={googleCustomEmail}
-                      onChange={(e) => {
-                        setGoogleCustomEmail(e.target.value);
-                        if (googleCustomError) setGoogleCustomError('');
-                      }}
-                      placeholder="E-mail ou telefone"
-                      style={{ backgroundColor: '#ffffff', color: '#202124' }}
-                      className={`w-full bg-white text-[#202124] placeholder-[#5f6368] border ${
-                        googleCustomError ? 'border-[#b3261e]' : 'border-[#747775] focus:border-[#0b57d0]'
-                      } focus:ring-1 focus:ring-[#0b57d0] rounded-md px-3.5 py-3.5 text-sm outline-none transition cursor-text`}
-                      autoFocus
-                    />
-                    {googleCustomError && (
-                      <p className="text-xs text-[#b3261e] mt-1.5 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                        <span>{googleCustomError}</span>
-                      </p>
-                    )}
-                  </div>
-
-                  <p className="text-xs text-[#444746] leading-relaxed">
-                    Para continuar, o Google compartilhará seu nome, endereço de e-mail e foto do perfil com o Controle Financeiro.
-                  </p>
-
-                  <div className="flex items-center justify-end gap-3 pt-3">
-                    <button
-                      type="button"
-                      onClick={() => setShowGooglePicker(false)}
-                      className="px-4 py-2 rounded-full text-sm font-medium text-[#0b57d0] hover:bg-blue-50 transition cursor-pointer"
-                    >
-                      Cancelar
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-6 py-2.5 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-sm font-medium transition shadow-sm cursor-pointer"
-                    >
-                      Avançar
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <form onSubmit={handleGooglePasswordStepSubmit} className="space-y-5">
-                  <div>
-                    <h3 className="text-2xl font-normal text-[#202124]">Olá</h3>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setGooglePopupStep('email');
-                        setGoogleCustomError('');
-                      }}
-                      className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#747775]/60 hover:bg-slate-50 text-xs font-medium text-[#202124] transition cursor-pointer"
-                    >
-                      <span className="w-4 h-4 rounded-full bg-[#0b57d0] text-white text-[10px] flex items-center justify-center font-bold">
-                        {googleCustomEmail.charAt(0).toUpperCase()}
-                      </span>
-                      <span className="truncate max-w-[210px]">{googleCustomEmail}</span>
-                      <ChevronDown className="w-3.5 h-3.5 text-[#444746]" />
-                    </button>
-                  </div>
-
-                  <div>
-                    <input
-                      type={showGooglePasswordText ? 'text' : 'password'}
-                      value={googleCustomPassword}
-                      onChange={(e) => {
-                        setGoogleCustomPassword(e.target.value);
-                        if (googleCustomError) setGoogleCustomError('');
-                      }}
-                      placeholder="Digite sua senha"
-                      style={{ backgroundColor: '#ffffff', color: '#202124' }}
-                      className={`w-full bg-white text-[#202124] placeholder-[#5f6368] border ${
-                        googleCustomError ? 'border-[#b3261e]' : 'border-[#747775] focus:border-[#0b57d0]'
-                      } focus:ring-1 focus:ring-[#0b57d0] rounded-md px-3.5 py-3.5 text-sm outline-none transition cursor-text`}
-                      autoFocus
-                    />
-                    {googleCustomError && (
-                      <p className="text-xs text-[#b3261e] mt-1.5 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                        <span>{googleCustomError}</span>
-                      </p>
-                    )}
-
-                    <label className="mt-3 inline-flex items-center gap-2.5 text-xs text-[#202124] cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={showGooglePasswordText}
-                        onChange={(e) => setShowGooglePasswordText(e.target.checked)}
-                        className="w-4 h-4 rounded border-slate-400 text-[#0b57d0] focus:ring-[#0b57d0] cursor-pointer"
-                      />
-                      <span>Mostrar senha</span>
-                    </label>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-3 pt-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setGooglePopupStep('email');
-                        setGoogleCustomError('');
-                      }}
-                      className="px-4 py-2 rounded-full text-sm font-medium text-[#0b57d0] hover:bg-blue-50 transition cursor-pointer"
-                    >
-                      Voltar
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-6 py-2.5 rounded-full bg-[#0b57d0] hover:bg-[#0842a0] text-white text-sm font-medium transition shadow-sm cursor-pointer"
-                    >
-                      Avançar
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
-          </div>
-        )}
       </div>
     );
   }
