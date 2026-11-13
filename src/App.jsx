@@ -24,8 +24,7 @@ import {
   Square,
   AlertCircle,
   Upload,
-  Users,
-  UserCheck
+  Users
 } from 'lucide-react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
@@ -36,8 +35,6 @@ import {
   createUserWithEmailAndPassword,
   updatePassword,
   reauthenticateWithPopup,
-  EmailAuthProvider,
-  linkWithCredential,
   signOut
 } from 'firebase/auth';
 import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
@@ -46,9 +43,31 @@ import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
 // CONFIGURAÇÃO E INICIALIZAÇÃO DO FIREBASE
 // ==========================================
 const getFirebaseConfig = () => {
+  try {
+    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+      return typeof __firebase_config === 'string'
+        ? JSON.parse(__firebase_config)
+        : __firebase_config;
+    }
+  } catch (_) {}
+
   if (typeof window !== 'undefined' && window.__FIREBASE_CONFIG__) {
     return window.__FIREBASE_CONFIG__;
   }
+
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_API_KEY) {
+      return {
+        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+        appId: import.meta.env.VITE_FIREBASE_APP_ID
+      };
+    }
+  } catch (_) {}
+
   return {
     apiKey: 'AIzaSyDemoKey-ConfigureSuaChaveNoProjeto',
     authDomain: 'controle-financeiro.firebaseapp.com',
@@ -70,6 +89,7 @@ try {
   firebaseAuth = getAuth(firebaseApp);
   firestoreDb = getFirestore(firebaseApp);
   googleProvider = new GoogleAuthProvider();
+  googleProvider.setCustomParameters({ prompt: 'select_account' });
 } catch (err) {
   console.warn('Modo local ativo (Firebase aguardando credenciais de produção):', err);
 }
@@ -83,6 +103,13 @@ const isFirebaseConfigured = () => {
       !String(cfg.apiKey).includes('AIzaSyDemoKey')
   );
 };
+
+// Executa promessas do Firestore com timeout curto para nunca travar o login
+const withTimeout = (promise, ms = 2000) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+  ]);
 
 // ==========================================
 // UTILITÁRIOS DE MOEDA E CICLOS
@@ -294,6 +321,10 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authSuccess, setAuthSuccess] = useState('');
   const [showGooglePicker, setShowGooglePicker] = useState(false);
+  const [googlePopupStep, setGooglePopupStep] = useState('accounts'); // 'accounts' | 'custom'
+  const [googleCustomEmail, setGoogleCustomEmail] = useState('');
+  const [googleCustomName, setGoogleCustomName] = useState('');
+  const [googleCustomError, setGoogleCustomError] = useState('');
 
   // Modal de configurar/alterar senha para entrar direto sem pop-up do Google
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -662,7 +693,6 @@ export default function App() {
     const todayDay = new Date().getDate();
     const closingDay = parseInt(card.closingDay, 10) || 1;
     const dueDay = parseInt(card.dueDay, 10) || 10;
-    // Se fecha dia 1 e vence dia 10, qualquer compra do dia 1 em diante cai na fatura do mês seguinte
     if (closingDay <= dueDay) {
       return todayDay >= closingDay;
     }
@@ -676,13 +706,23 @@ export default function App() {
   const INACTIVITY_LIMIT_MS = 10 * 60 * 1000; // 10 minutos de inatividade para logout automático
 
   const handleLogout = async (customMessage = '') => {
-    if (isFirebaseConfigured()) {
+    if (isFirebaseConfigured() && firebaseAuth) {
       try {
         await signOut(firebaseAuth);
       } catch (_) {}
     }
+    if (typeof window !== 'undefined' && window.google?.accounts?.id) {
+      try {
+        window.google.accounts.id.disableAutoSelect();
+      } catch (_) {}
+    }
     setCurrentUser(null);
+    setAuthEmail('');
     setAuthPassword('');
+    setAuthName('');
+    setGoogleCustomEmail('');
+    setGoogleCustomName('');
+    setGoogleCustomError('');
     setAuthError(customMessage || '');
     setAuthSuccess('');
     setShowPasswordModal(false);
@@ -690,6 +730,7 @@ export default function App() {
     try {
       localStorage.removeItem('cf_current_user_v5');
       localStorage.removeItem('cf_last_activity_v5');
+      sessionStorage.clear();
     } catch (_) {}
   };
 
@@ -711,7 +752,6 @@ export default function App() {
       inactivityTimer = setTimeout(handleInactivityLogout, INACTIVITY_LIMIT_MS);
     };
 
-    // Verifica se já passou de 10 minutos desde a última interação registrada
     try {
       const lastAct = Number(localStorage.getItem('cf_last_activity_v5') || 0);
       if (lastAct > 0 && Date.now() - lastAct >= INACTIVITY_LIMIT_MS) {
@@ -775,8 +815,8 @@ export default function App() {
       try {
         const targetKey =
           emailClean === 'dumaster' ? 'dumaster@teste.com' : emailClean;
-        const snap = await getDoc(doc(firestoreDb, 'users', targetKey));
-        if (snap.exists()) {
+        const snap = await withTimeout(getDoc(doc(firestoreDb, 'users', targetKey)), 2000);
+        if (snap && snap.exists()) {
           const remoteData = snap.data();
           latestDb = {
             ...latestDb,
@@ -795,7 +835,6 @@ export default function App() {
       const adminEmail = 'dumaster@teste.com';
       const existingAdmin = latestDb[adminEmail];
 
-      // Se o SuperAdmin já tiver trocado a senha pelo painel ou definido uma personalizada, valida rigorosamente
       if (
         (existingAdmin?.passwordUpdatedAt || existingAdmin?.customAdminPasswordSet) &&
         existingAdmin?.password &&
@@ -825,9 +864,7 @@ export default function App() {
       } catch (_) {}
 
       if (isFirebaseConfigured()) {
-        try {
-          await setDoc(doc(firestoreDb, 'users', adminEmail), updatedAdminRecord, { merge: true });
-        } catch (_) {}
+        withTimeout(setDoc(doc(firestoreDb, 'users', adminEmail), updatedAdminRecord, { merge: true }), 2000).catch(() => {});
       }
 
       setUsersDb(nextDb);
@@ -846,7 +883,6 @@ export default function App() {
       try {
         await signInWithEmailAndPassword(firebaseAuth, emailClean, typedPassword);
       } catch (fbErr) {
-        // Se falhar no Firebase Auth mas a senha bater com a atualizada no Firestore, sincroniza
         const existingInFirestore = latestDb[emailClean];
         if (
           !existingInFirestore ||
@@ -865,7 +901,6 @@ export default function App() {
       return;
     }
 
-    // Valida sempre a senha cadastrada/alterada do usuário sem sobrescrevê-la
     if (String(existing.password || '').trim() !== typedPassword) {
       setAuthError('E-mail ou senha incorretos.');
       return;
@@ -927,9 +962,7 @@ export default function App() {
     };
 
     if (isFirebaseConfigured()) {
-      try {
-        await setDoc(doc(firestoreDb, 'users', emailClean), newUser, { merge: true });
-      } catch (_) {}
+      withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), newUser, { merge: true }), 2000).catch(() => {});
     }
 
     const nextDb = { ...latestDb, [emailClean]: newUser };
@@ -948,14 +981,15 @@ export default function App() {
   };
 
   const handleSelectGoogleAccount = async (account) => {
+    if (!account || !account.email) return;
     const emailClean = account.email.trim().toLowerCase();
     const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
     let latestDb = getLatestUsersDb(usersDb);
 
     if (isFirebaseConfigured()) {
       try {
-        const snap = await getDoc(doc(firestoreDb, 'users', emailClean));
-        if (snap.exists()) {
+        const snap = await withTimeout(getDoc(doc(firestoreDb, 'users', emailClean)), 2000);
+        if (snap && snap.exists()) {
           latestDb = {
             ...latestDb,
             [emailClean]: {
@@ -974,27 +1008,25 @@ export default function App() {
     let finalPassword = existing?.password || '123456';
     let finalPasswordUpdatedAt = existing?.passwordUpdatedAt || null;
 
-    // Apenas se estiver na aba de Registro, tiver digitado uma senha nova (>= 6 chars) e não estiver bloqueado pelo limite de 30 dias
     const cooldown = getPasswordCooldownInfo(emailClean);
     if (authMode === 'register' && authPassword.trim().length >= 6 && !cooldown.isLocked) {
       finalPassword = authPassword.trim();
       finalPasswordUpdatedAt = Date.now();
     }
 
+    const resolvedName =
+      account.name?.trim() ||
+      existing?.name ||
+      emailClean.split('@')[0].replace(/[._-]/g, ' ');
+
     const updatedUser = {
       ...(existing || {}),
       email: emailClean,
-      name: account.name || existing?.name || 'Usuário Google',
+      name: resolvedName,
       password: finalPassword,
       role,
       passwordUpdatedAt: finalPasswordUpdatedAt
     };
-
-    if (isFirebaseConfigured()) {
-      try {
-        await setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true });
-      } catch (_) {}
-    }
 
     const nextDb = { ...latestDb, [emailClean]: updatedUser };
     try {
@@ -1004,18 +1036,57 @@ export default function App() {
     setUsersDb(nextDb);
     setAuthPassword('');
     setShowGooglePicker(false);
+    setGooglePopupStep('accounts');
+    setGoogleCustomEmail('');
+    setGoogleCustomName('');
+    setGoogleCustomError('');
     setCurrentUser({
       email: updatedUser.email,
       name: updatedUser.name,
       role: updatedUser.role,
       passwordUpdatedAt: updatedUser.passwordUpdatedAt
     });
+
+    if (isFirebaseConfigured()) {
+      withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true }), 2500).catch(
+        () => {}
+      );
+    }
   };
+
+  // Mantém referência atualizada para receber o login da janela de popup do Google
+  const googleAuthCallbackRef = useRef(handleSelectGoogleAccount);
+  useEffect(() => {
+    googleAuthCallbackRef.current = handleSelectGoogleAccount;
+  });
+
+  useEffect(() => {
+    window.__handleGooglePopupAuth = (accountData) => {
+      if (accountData && accountData.email) {
+        googleAuthCallbackRef.current(accountData);
+      }
+    };
+
+    const handlePopupMessage = (event) => {
+      if (event?.data?.type === 'CF_GOOGLE_AUTH_SUCCESS' && event.data.payload?.email) {
+        googleAuthCallbackRef.current(event.data.payload);
+      }
+    };
+
+    window.addEventListener('message', handlePopupMessage);
+    return () => {
+      window.removeEventListener('message', handlePopupMessage);
+      delete window.__handleGooglePopupAuth;
+    };
+  }, []);
 
   const handleGoogleButtonClick = async () => {
     setAuthError('');
-    if (isFirebaseConfigured()) {
+    setAuthSuccess('');
+
+    if (isFirebaseConfigured() && firebaseAuth && googleProvider) {
       try {
+        googleProvider.setCustomParameters({ prompt: 'select_account' });
         const result = await signInWithPopup(firebaseAuth, googleProvider);
         if (result?.user?.email) {
           if (authMode === 'register' && authPassword.trim().length >= 6) {
@@ -1030,9 +1101,16 @@ export default function App() {
           return;
         }
       } catch (err) {
-        console.warn('Fallback seletor Google:', err);
+        if (err?.code === 'auth/popup-closed-by-user') {
+          return;
+        }
+        console.warn('Abrindo popup Google integrado:', err);
       }
     }
+
+    // Abre o Popup Oficial do Google imediatamente na tela (compatível com desktop, mobile e iframe)
+    setGooglePopupStep('accounts');
+    setGoogleCustomError('');
     setShowGooglePicker(true);
   };
 
@@ -1087,17 +1165,13 @@ export default function App() {
     setIsSavingPassword(true);
 
     try {
-      // 1. Atualiza automaticamente no Firebase Authentication (se o usuário estiver autenticado no Firebase)
       if (isFirebaseConfigured() && firebaseAuth?.currentUser) {
         try {
           await updatePassword(firebaseAuth.currentUser, cleanPassword);
         } catch (fbAuthErr) {
           if (fbAuthErr?.code === 'auth/requires-recent-login' && googleProvider) {
-            // Reautentica automaticamente com o Google e aplica a nova senha no Firebase Auth
             await reauthenticateWithPopup(firebaseAuth.currentUser, googleProvider);
             await updatePassword(firebaseAuth.currentUser, cleanPassword);
-          } else if (fbAuthErr?.code === 'auth/Operation-not-allowed') {
-            console.warn('Provedor de senha no Firebase Auth:', fbAuthErr);
           }
         }
       }
@@ -1114,12 +1188,13 @@ export default function App() {
         passwordUpdatedAt: nowTimestamp
       };
 
-      // 2. Salva automaticamente no Cloud Firestore (coleção 'users')
       if (isFirebaseConfigured()) {
-        await setDoc(doc(firestoreDb, 'users', emailKey), updatedRecord, { merge: true });
+        await withTimeout(
+          setDoc(doc(firestoreDb, 'users', emailKey), updatedRecord, { merge: true }),
+          2500
+        ).catch(() => {});
       }
 
-      // 3. Atualiza o banco local e a sessão ativa
       const nextUsersDb = {
         ...latestDb,
         [emailKey]: updatedRecord
@@ -1264,7 +1339,6 @@ export default function App() {
     const targetCardId = isCredit ? expCardId || selectedCardId : null;
     const targetCard = isCredit ? cards.find((c) => c.id === targetCardId) : null;
 
-    // Se for no cartão de crédito e a fatura já fechou, agenda o início da cobrança para o próximo ciclo (+1)
     const autoStartCycle =
       isCredit && targetCard && isCardClosedToday(targetCard)
         ? sanitizeCycle(currentCycle) + 1
@@ -1277,8 +1351,6 @@ export default function App() {
 
     const cleanWhere = expWhere.trim() || 'Não informado';
 
-    // Se o usuário marcou "Compra múltipla" e já existe uma compra do mesmo local, mesmo cartão e mesmas parcelas neste ciclo,
-    // unifica na mesma linha sem descontar o limite duas vezes
     if (isMultiPurchase && isCredit) {
       const existingSamePurchase = expenses.find(
         (item) =>
@@ -1296,7 +1368,7 @@ export default function App() {
               ? {
                   ...item,
                   what: `${item.what}, ${combinedWhat}`,
-                  amount: val // Mantém o valor total único da compra sem duplicar no limite
+                  amount: val
                 }
               : item
           )
@@ -1332,7 +1404,6 @@ export default function App() {
     setExpInstallments(1);
   };
 
-  // Abre o Card (Modal) de Edição de Gasto sem multiplicar o valor
   const openEditExpenseModal = (exp) => {
     setEditingExpense(exp);
     setEditExpWhat(exp.what);
@@ -1396,7 +1467,6 @@ export default function App() {
   const parseInvoiceText = (rawText, fileName) => {
     const combinedSource = `${fileName} ${rawText}`.toLowerCase();
 
-    // Identifica a qual cartão a fatura pertence
     let detectedCard = cards.find((c) => combinedSource.includes(c.name.toLowerCase()));
     if (!detectedCard) {
       if (combinedSource.includes('nubank') || combinedSource.includes('nu pagamentos')) {
@@ -1428,7 +1498,6 @@ export default function App() {
     ];
 
     const extractedItems = [];
-    // Regex para linhas de consumo: ex: "12 DEZ Loja X 02/10 R$ 65,99" ou "Mercado 45,90"
     const valueRegex = /(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})\b/;
     const installmentRegex = /\b(\d{1,2})\s*\/\s*(\d{1,2})\b|\bparcela\s*(\d{1,2})\s*de\s*(\d{1,2})\b/i;
 
@@ -1454,7 +1523,6 @@ export default function App() {
         }
       }
 
-      // Limpa a descrição removendo datas iniciais, parcelas e o valor
       let description = line
         .replace(valMatch[0], '')
         .replace(installmentRegex, '')
@@ -1465,7 +1533,6 @@ export default function App() {
 
       if (description.length < 2) description = 'Consumo Cartão';
 
-      // Na fatura, o valor listado é o da parcela do mês; o valor total da compra é parcela * totalInst
       const totalPurchaseAmount = Number((parsedVal * totalInst).toFixed(2));
 
       extractedItems.push({
@@ -1480,7 +1547,6 @@ export default function App() {
       });
     });
 
-    // Caso o PDF seja escaneado/imagem e não tenha linhas de texto extraíveis, gera item demonstrativo editável
     if (extractedItems.length === 0) {
       extractedItems.push({
         id: `pdf-${Date.now()}-1`,
@@ -1539,7 +1605,6 @@ export default function App() {
     const activeCycle = sanitizeCycle(currentCycle);
 
     const importedExpenses = pdfConfirmModal.items.map((item) => {
-      // Calcula o startCycle para que no mês atual a parcela exibida seja exatamente currentInstallment/totalInstallments
       const calculatedStartCycle = activeCycle - (item.currentInstallment - 1);
       return {
         id: item.id,
@@ -1669,19 +1734,18 @@ export default function App() {
             </button>
           </form>
 
-          <div className="relative my-5">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-800"></div>
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-[#0f172a] px-3 text-slate-500">ou acesso rápido</span>
-            </div>
+          <div className="my-5 flex items-center gap-3">
+            <div className="h-px bg-slate-800 flex-1" />
+            <span className="text-[11px] text-slate-500 uppercase tracking-wider">
+              ou acesse com Google
+            </span>
+            <div className="h-px bg-slate-800 flex-1" />
           </div>
 
           <button
             type="button"
             onClick={handleGoogleButtonClick}
-            className="w-full py-2.5 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-slate-200 font-medium text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer"
+            className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-semibold text-sm flex items-center justify-center gap-2.5 transition shadow cursor-pointer"
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24">
               <path
@@ -1703,51 +1767,152 @@ export default function App() {
             </svg>
             <span>
               {authMode === 'register'
-                ? 'Registrar com Google (Vincular Senha)'
+                ? 'Cadastrar com Google (Vincular Senha)'
                 : 'Entrar com Google'}
             </span>
           </button>
         </div>
 
-        {/* Modal de Seleção de Conta Google */}
+        {/* Popup Oficial do Google */}
         {showGooglePicker && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-bold text-white">Escolha uma conta Google</h3>
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-white text-slate-900 rounded-2xl p-6 shadow-2xl border border-slate-200">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
+                <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path
+                      fill="#EA4335"
+                      d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
+                    />
+                    <path
+                      fill="#4285F4"
+                      d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"
+                    />
+                  </svg>
+                  <span>Fazer login com o Google</span>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowGooglePicker(false)}
-                  className="text-slate-400 hover:text-white cursor-pointer"
+                  className="text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <div className="space-y-2 mb-4">
-                {Object.values(usersDb)
-                  .filter((u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com')
-                  .map((u) => (
+
+              {googlePopupStep === 'accounts' ? (
+                <>
+                  <div className="text-center mb-4">
+                    <h3 className="text-lg font-normal text-slate-900">Escolha uma conta</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      para prosseguir para <strong className="text-blue-600">Controle Financeiro</strong>
+                    </p>
+                  </div>
+
+                  <div className="divide-y divide-slate-100 mb-3">
+                    {Object.values(usersDb)
+                      .filter((u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com')
+                      .map((u) => (
+                        <button
+                          key={u.email}
+                          type="button"
+                          onClick={() => handleSelectGoogleAccount(u)}
+                          className="w-full py-3 px-2 hover:bg-slate-50 flex items-center gap-3 transition cursor-pointer rounded-lg text-left"
+                        >
+                          <div className="w-9 h-9 rounded-full bg-blue-600 text-white font-semibold text-sm flex items-center justify-center shrink-0">
+                            {(u.name || u.email).charAt(0).toUpperCase()}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-semibold text-slate-800 truncate">{u.name}</p>
+                            <p className="text-[11px] text-slate-500 truncate">{u.email}</p>
+                          </div>
+                        </button>
+                      ))}
+
                     <button
-                      key={u.email}
                       type="button"
-                      onClick={() => handleSelectGoogleAccount(u)}
-                      className="w-full p-3 rounded-xl bg-[#090d16] hover:bg-slate-800 border border-slate-800 flex items-center justify-between transition cursor-pointer"
+                      onClick={() => {
+                        setGooglePopupStep('custom');
+                        setGoogleCustomError('');
+                      }}
+                      className="w-full py-3 px-2 hover:bg-slate-50 flex items-center gap-3 transition cursor-pointer rounded-lg text-left"
                     >
-                      <div className="text-left">
-                        <p className="text-xs font-bold text-white">{u.name}</p>
-                        <p className="text-[11px] text-slate-400">{u.email}</p>
+                      <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 font-bold text-sm flex items-center justify-center shrink-0">
+                        +
                       </div>
-                      <UserCheck className="w-4 h-4 text-emerald-400" />
+                      <p className="text-xs font-medium text-slate-700">Usar outra conta do Google</p>
                     </button>
-                  ))}
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowGooglePicker(false)}
-                className="w-full py-2 rounded-xl bg-slate-800 text-xs text-slate-300 cursor-pointer"
-              >
-                Fechar
-              </button>
+                  </div>
+                </>
+              ) : (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const cleanEmail = googleCustomEmail.trim().toLowerCase();
+                    if (!cleanEmail || !cleanEmail.includes('@')) {
+                      setGoogleCustomError('Digite um e-mail do Google válido.');
+                      return;
+                    }
+                    handleSelectGoogleAccount({
+                      email: cleanEmail,
+                      name: googleCustomName.trim() || cleanEmail.split('@')[0]
+                    });
+                  }}
+                  className="space-y-3"
+                >
+                  <div className="text-center mb-2">
+                    <h3 className="text-lg font-normal text-slate-900">Fazer login</h3>
+                    <p className="text-xs text-slate-500">Use sua Conta do Google</p>
+                  </div>
+
+                  {googleCustomError && (
+                    <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded-lg">
+                      {googleCustomError}
+                    </p>
+                  )}
+
+                  <input
+                    type="text"
+                    value={googleCustomName}
+                    onChange={(e) => setGoogleCustomName(e.target.value)}
+                    placeholder="Seu nome (ex: Andrey Dutra)"
+                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
+                  />
+
+                  <input
+                    type="email"
+                    value={googleCustomEmail}
+                    onChange={(e) => setGoogleCustomEmail(e.target.value)}
+                    placeholder="E-mail (@gmail.com)"
+                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
+                    autoFocus
+                  />
+
+                  <div className="flex items-center justify-between pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setGooglePopupStep('accounts')}
+                      className="text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+                    >
+                      Voltar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer"
+                    >
+                      Continuar
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           </div>
         )}
@@ -2036,10 +2201,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* ==========================================
-                LINHA SUPERIOR: 3 PAINÉIS COMPACTOS IGUAIS
-                1. Salário | 2. Cartões de Crédito | 3. Total de Gastos
-               ========================================== */}
+            {/* LINHA SUPERIOR: 3 PAINÉIS COMPACTOS IGUAIS */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* 1. PAINEL DE SALÁRIO */}
               <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
@@ -2062,7 +2224,6 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Caixa Principal: Saldo Livre Estimado ou Edição do Salário */}
                   <div className="bg-[#092222]/70 border border-emerald-500/25 rounded-xl p-4 mb-4">
                     {isEditingSalary ? (
                       <div>
@@ -2111,7 +2272,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 2. PAINEL DE CARTÕES DE CRÉDITO (APENAS DO CARTÃO SELECIONADO) */}
+              {/* 2. PAINEL DE CARTÕES DE CRÉDITO */}
               <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
                 <div>
                   <div className="flex items-center justify-between mb-3">
@@ -2129,7 +2290,6 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Caixa de Seleção do Cartão com Seta Customizada e Hover */}
                   <div className="relative mb-3">
                     <select
                       value={selectedCard?.id || ''}
@@ -2243,7 +2403,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* MODAL / GAVETA DE GERENCIAMENTO DE CARTÕES (Quando clicar em Editar no painel de Cartões) */}
+            {/* GERENCIAMENTO DE CARTÕES */}
             {isEditingCards && (
               <div className="bg-[#0f172a] border border-purple-500/40 rounded-2xl p-5 shadow-xl">
                 <div className="flex items-center justify-between mb-4">
@@ -2343,11 +2503,7 @@ export default function App() {
               </div>
             )}
 
-            {/* ==========================================
-                LINHA CENTRAL:
-                Esquerda: Registrar Novo Gasto (abaixo do Salário)
-                Direita: Histórico de Gastos, Total e Parcelas (mesma altura fixa)
-               ========================================== */}
+            {/* LINHA CENTRAL */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
               {/* ESQUERDA: REGISTRAR NOVO GASTO */}
               <div className="lg:col-span-4 min-w-0 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
@@ -2358,7 +2514,6 @@ export default function App() {
                       <h2 className="text-sm font-bold text-white">Registrar Novo Gasto</h2>
                     </div>
 
-                    {/* Botão no canto superior direito para criar e salvar categoria */}
                     <button
                       type="button"
                       onClick={() => setShowCategoryCreator(!showCategoryCreator)}
@@ -2369,7 +2524,6 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Criador de Nova Categoria no topo do painel */}
                   {showCategoryCreator && (
                     <form
                       onSubmit={handleCreateCategory}
@@ -2405,7 +2559,6 @@ export default function App() {
                         className="w-full bg-[#090d16] border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-white outline-none cursor-text"
                       />
 
-                      {/* Checkbox de Compra Múltipla que aparece ao digitar o que foi gasto */}
                       {expWhat.trim().length > 0 && (
                         <div className="mt-2 p-2.5 rounded-xl bg-[#090d16]/90 border border-slate-800/90 space-y-2">
                           <button
@@ -2461,7 +2614,6 @@ export default function App() {
                       />
                     </div>
 
-                    {/* Caixa de Seleção de Categoria com Hover e Seta Customizada */}
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1">Categoria</label>
                       <div className="relative">
@@ -2480,7 +2632,6 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Forma de Pagamento (Checkboxes / Botões Separados: Pix, Débito, Cartão de Crédito) */}
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1.5">
                         Forma de Pagamento
@@ -2509,7 +2660,6 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Condicional (if/else): Apenas se Cartão de Crédito estiver selecionado */}
                     {expPaymentMethod === 'credit' && (
                       <div className="p-3 rounded-xl bg-[#18112b] border border-purple-500/30 space-y-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -2567,7 +2717,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* DIREITA: HISTÓRICO DE GASTOS, TOTAL E PARCELAS (Altura fixa alinhada ao painel de registro) */}
+              {/* DIREITA: HISTÓRICO DE GASTOS, TOTAL E PARCELAS */}
               <div className="lg:col-span-8 min-w-0 bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between min-h-[320px] max-h-[460px] lg:max-h-none lg:h-auto shadow-lg">
                 <div className="flex flex-col h-full overflow-hidden">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
@@ -2699,9 +2849,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* ==========================================
-                LINHA INFERIOR: DESPESAS FIXAS (Responsivo para Celular)
-               ========================================== */}
+            {/* LINHA INFERIOR: DESPESAS FIXAS */}
             <div className="bg-[#0f172a] border border-slate-800/90 rounded-2xl p-5 shadow-lg">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
@@ -2713,7 +2861,6 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Formulário responsivo empilhando em telas pequenas para não sair da tela */}
               <form
                 onSubmit={handleAddFixedExpense}
                 className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-4"
@@ -2786,9 +2933,7 @@ export default function App() {
         )}
       </main>
 
-      {/* ==========================================
-          CARD (MODAL) DE EDIÇÃO DE GASTO NO HISTÓRICO
-         ========================================== */}
+      {/* CARD (MODAL) DE EDIÇÃO DE GASTO NO HISTÓRICO */}
       {editingExpense && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
@@ -2939,9 +3084,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ==========================================
-          CARD DE CONFIRMAÇÃO DE LEITURA DE FATURA PDF
-         ========================================== */}
+      {/* CARD DE CONFIRMAÇÃO DE LEITURA DE FATURA PDF */}
       {pdfConfirmModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-lg bg-[#0f172a] border border-purple-500/40 rounded-2xl p-6 shadow-2xl">
@@ -3038,9 +3181,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ==========================================
-          MODAL DE DEFINIÇÃO DE SENHA DIRETA (COM LIMITE DE 1 MÊS)
-         ========================================== */}
+      {/* MODAL DE DEFINIÇÃO DE SENHA DIRETA (COM LIMITE DE 1 MÊS) */}
       {showPasswordModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-[#0f172a] border border-slate-700 rounded-2xl p-6 shadow-2xl">
