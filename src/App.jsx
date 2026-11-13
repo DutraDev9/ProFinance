@@ -42,42 +42,32 @@ import {
 import { getFirestore, doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 
 // ==========================================
-// CONFIGURAÇÃO E INICIALIZAÇÃO DO FIREBASE
+// CONFIGURAÇÃO E INICIALIZAÇÃO DO FIREBASE (pro-finance-control)
 // ==========================================
 const getFirebaseConfig = () => {
-  try {
-    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-      return typeof __firebase_config === 'string'
-        ? JSON.parse(__firebase_config)
-        : __firebase_config;
-    }
-  } catch (_) {}
-
-  if (typeof window !== 'undefined' && window.__FIREBASE_CONFIG__) {
-    return window.__FIREBASE_CONFIG__;
-  }
-
-  try {
-    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_API_KEY) {
-      return {
-        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-        appId: import.meta.env.VITE_FIREBASE_APP_ID
-      };
-    }
-  } catch (_) {}
-
+  const env =
+    typeof process !== 'undefined' && process?.env
+      ? process.env
+      : typeof window !== 'undefined' && window.__env
+      ? window.__env
+      : {};
   return {
-    apiKey: 'AIzaSyDemoKey-ConfigureSuaChaveNoProjeto',
-    authDomain: 'controle-financeiro.firebaseapp.com',
-    projectId: 'controle-financeiro',
-    storageBucket: 'controle-financeiro.appspot.com',
-    messagingSenderId: '000000000000',
-    appId: '1:000000000000:web:000000000000'
+    apiKey: env.VITE_FIREBASE_API_KEY || "AIzaSyCsQJYqDTk3jwd3ZD3IDvfWjprk-IoFXR4",
+    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || "pro-finance-control.firebaseapp.com",
+    projectId: env.VITE_FIREBASE_PROJECT_ID || "pro-finance-control",
+    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || "pro-finance-control.firebasestorage.app",
+    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1049329594472",
+    appId: env.VITE_FIREBASE_APP_ID || "1:1049329594472:web:8dad6bc3f5a343111e8bdd"
   };
+};
+
+const firebaseConfig = getFirebaseConfig();
+
+const isFirebaseConfigured = () => {
+  return Boolean(
+    firebaseConfig?.apiKey &&
+    !String(firebaseConfig.apiKey).includes('DemoKey')
+  );
 };
 
 let firebaseApp = null;
@@ -86,25 +76,14 @@ let firestoreDb = null;
 let googleProvider = null;
 
 try {
-  const cfg = getFirebaseConfig();
-  firebaseApp = !getApps().length ? initializeApp(cfg) : getApp();
+  firebaseApp = !getApps().length ? initializeApp(firebaseConfig) : getApp();
   firebaseAuth = getAuth(firebaseApp);
   firestoreDb = getFirestore(firebaseApp);
   googleProvider = new GoogleAuthProvider();
   googleProvider.setCustomParameters({ prompt: 'select_account' });
 } catch (err) {
-  console.warn('Modo local ativo (Firebase aguardando credenciais de produção):', err);
+  console.error('[Firebase] Erro ao inicializar:', err);
 }
-
-const isFirebaseConfigured = () => {
-  const cfg = getFirebaseConfig();
-  return Boolean(
-    firebaseAuth &&
-      firestoreDb &&
-      cfg?.apiKey &&
-      !String(cfg.apiKey).includes('AIzaSyDemoKey')
-  );
-};
 
 if (!isFirebaseConfigured()) {
   console.warn(
@@ -1026,7 +1005,7 @@ export default function App() {
 
     let latestDb = getLatestUsersDb(usersDb);
 
-    if (isFirebaseConfigured()) {
+    if (isFirebaseConfigured() && firestoreDb) {
       try {
         const snap = await withTimeout(getDoc(doc(firestoreDb, 'users', emailClean)), 2000);
         if (snap && snap.exists()) {
@@ -1078,7 +1057,7 @@ export default function App() {
       passwordUpdatedAt: updatedUser.passwordUpdatedAt
     });
 
-    if (isFirebaseConfigured()) {
+    if (isFirebaseConfigured() && firestoreDb) {
       withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), updatedUser, { merge: true }), 2500).catch(() => {});
     }
   };
