@@ -1277,10 +1277,8 @@ export default function App() {
     setGoogleCustomError('');
     setGooglePopupStep('login');
 
-    // Abre também o modal do Popup Google na tela (garante funcionamento mesmo se o navegador bloquear popups externos)
-    setShowGooglePicker(true);
-
-    if (isFirebaseConfigured() && firebaseAuth && googleProvider) {
+    // 1. Tenta abrir PRIMEIRO o Popup Oficial do Google via Firebase Auth
+    if (firebaseAuth && googleProvider && isFirebaseConfigured()) {
       try {
         googleProvider.setCustomParameters({ prompt: 'select_account' });
         const result = await signInWithPopup(firebaseAuth, googleProvider);
@@ -1297,14 +1295,22 @@ export default function App() {
           return;
         }
       } catch (err) {
-        if (err?.code === 'auth/popup-closed-by-user') {
+        if (
+          err?.code === 'auth/popup-closed-by-user' ||
+          err?.code === 'auth/cancelled-popup-request'
+        ) {
           return;
         }
-        console.warn('Usando janela de Popup Google integrada:', err);
+        console.error('Erro no Popup Oficial do Firebase:', err);
+        setAuthError(
+          `Erro no Google Auth (${err?.code || 'configuração'}): verifique suas chaves do Firebase e os Domínios Autorizados.`
+        );
+        return;
       }
     }
 
-    openExternalGooglePopupWindow();
+    // 2. Fallback caso as chaves reais do Firebase ainda não estejam preenchidas
+    setShowGooglePicker(true);
   };
 
   // ==========================================
