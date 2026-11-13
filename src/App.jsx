@@ -37,7 +37,7 @@ import {
   reauthenticateWithPopup,
   signOut
 } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 
 // ==========================================
 // CONFIGURAÇÃO E INICIALIZAÇÃO DO FIREBASE
@@ -280,7 +280,19 @@ export default function App() {
     }
   };
 
+  const getDeletedUsersList = () => {
+    try {
+      const raw = localStorage.getItem('cf_deleted_users_v5');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.map((e) => String(e).trim().toLowerCase());
+      }
+    } catch (_) {}
+    return [];
+  };
+
   const getLatestUsersDb = (fallbackState) => {
+    const deletedList = getDeletedUsersList();
     try {
       const saved = localStorage.getItem('cf_users_db_v5');
       if (saved) {
@@ -294,12 +306,23 @@ export default function App() {
             email: cleanKey
           };
         });
+        deletedList.forEach((delEmail) => {
+          if (delEmail !== 'dumaster@teste.com') {
+            delete merged[delEmail];
+          }
+        });
         return merged;
       }
     } catch (e) {
       console.error(e);
     }
-    return { ...DEFAULT_USERS_DB, ...(fallbackState || {}) };
+    const initial = { ...DEFAULT_USERS_DB, ...(fallbackState || {}) };
+    deletedList.forEach((delEmail) => {
+      if (delEmail !== 'dumaster@teste.com') {
+        delete initial[delEmail];
+      }
+    });
+    return initial;
   };
 
   const [usersDb, setUsersDb] = useState(() => getLatestUsersDb());
@@ -321,10 +344,18 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authSuccess, setAuthSuccess] = useState('');
   const [showGooglePicker, setShowGooglePicker] = useState(false);
-  const [googlePopupStep, setGooglePopupStep] = useState('accounts'); // 'accounts' | 'custom'
+  const [googlePopupStep, setGooglePopupStep] = useState('login'); // 'login' | 'accounts'
   const [googleCustomEmail, setGoogleCustomEmail] = useState('');
   const [googleCustomName, setGoogleCustomName] = useState('');
+  const [googleCustomPassword, setGoogleCustomPassword] = useState('');
   const [googleCustomError, setGoogleCustomError] = useState('');
+  const googlePopupWindowRef = useRef(null);
+
+  // Estados de Gerenciamento de Contas pelo SuperAdmin
+  const [adminEditingEmail, setAdminEditingEmail] = useState(null);
+  const [adminEditNameInput, setAdminEditNameInput] = useState('');
+  const [adminDeletingEmail, setAdminDeletingEmail] = useState(null);
+  const [adminFeedback, setAdminFeedback] = useState('');
 
   // Modal de configurar/alterar senha para entrar direto sem pop-up do Google
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -961,6 +992,12 @@ export default function App() {
       passwordUpdatedAt: null
     };
 
+    // Caso o e-mail tenha sido excluído anteriormente pelo admin, remove da lista de excluídos
+    try {
+      const deletedList = getDeletedUsersList().filter((e) => e !== emailClean);
+      localStorage.setItem('cf_deleted_users_v5', JSON.stringify(deletedList));
+    } catch (_) {}
+
     if (isFirebaseConfigured()) {
       withTimeout(setDoc(doc(firestoreDb, 'users', emailClean), newUser, { merge: true }), 2000).catch(() => {});
     }
@@ -984,6 +1021,13 @@ export default function App() {
     if (!account || !account.email) return;
     const emailClean = account.email.trim().toLowerCase();
     const role = emailClean === 'dumaster@teste.com' ? 'superadmin' : 'user';
+
+    // Remove da lista de excluídos se estiver fazendo login/cadastro novamente
+    try {
+      const deletedList = getDeletedUsersList().filter((e) => e !== emailClean);
+      localStorage.setItem('cf_deleted_users_v5', JSON.stringify(deletedList));
+    } catch (_) {}
+
     let latestDb = getLatestUsersDb(usersDb);
 
     if (isFirebaseConfigured()) {
@@ -1012,6 +1056,8 @@ export default function App() {
     if (authMode === 'register' && authPassword.trim().length >= 6 && !cooldown.isLocked) {
       finalPassword = authPassword.trim();
       finalPasswordUpdatedAt = Date.now();
+    } else if (!existing && account.password && String(account.password).trim().length >= 6) {
+      finalPassword = String(account.password).trim();
     }
 
     const resolvedName =
@@ -1033,12 +1079,19 @@ export default function App() {
       localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
     } catch (_) {}
 
+    if (googlePopupWindowRef.current && !googlePopupWindowRef.current.closed) {
+      try {
+        googlePopupWindowRef.current.close();
+      } catch (_) {}
+    }
+
     setUsersDb(nextDb);
     setAuthPassword('');
     setShowGooglePicker(false);
-    setGooglePopupStep('accounts');
+    setGooglePopupStep('login');
     setGoogleCustomEmail('');
     setGoogleCustomName('');
+    setGoogleCustomPassword('');
     setGoogleCustomError('');
     setCurrentUser({
       email: updatedUser.email,
@@ -1080,9 +1133,152 @@ export default function App() {
     };
   }, []);
 
+  const openExternalGooglePopupWindow = () => {
+    try {
+      const width = 450;
+      const height = 600;
+      const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+      const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+      const popup = window.open(
+        '',
+        'GoogleSignInPopup',
+        `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`
+      );
+
+      if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+        return false;
+      }
+
+      googlePopupWindowRef.current = popup;
+
+      const savedAccounts = Object.values(getLatestUsersDb(usersDb)).filter(
+        (u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com'
+      );
+
+      const accountsHtml = savedAccounts
+        .map(
+          (u) => `
+          <button type="button" class="acc-btn" onclick="selectSaved('${u.email.replace(/'/g, '')}', '${(u.name || '').replace(/'/g, '')}')">
+            <div class="avatar">${(u.name || u.email).charAt(0).toUpperCase()}</div>
+            <div class="acc-info">
+              <div class="acc-name">${u.name || u.email}</div>
+              <div class="acc-email">${u.email}</div>
+            </div>
+          </button>
+        `
+        )
+        .join('');
+
+      popup.document.open();
+      popup.document.write(`
+        <!DOCTYPE html>
+        <html lang="pt-BR">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Fazer login nas Contas do Google</title>
+          <style>
+            * { box-sizing: border-box; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+            body { margin: 0; padding: 24px; background: #fff; color: #202124; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
+            .card { width: 100%; max-width: 380px; border: 1px solid #dadce0; border-radius: 12px; padding: 32px 28px; }
+            .header { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 16px; font-size: 14px; color: #5f6368; font-weight: 500; }
+            h1 { font-size: 22px; font-weight: 400; text-align: center; margin: 0 0 6px; }
+            p.sub { font-size: 14px; text-align: center; color: #5f6368; margin: 0 0 24px; }
+            .acc-list { margin-bottom: 18px; border-top: 1px solid #f1f3f4; }
+            .acc-btn { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 8px; border: none; border-bottom: 1px solid #f1f3f4; background: transparent; cursor: pointer; text-align: left; border-radius: 6px; }
+            .acc-btn:hover { background: #f8f9fa; }
+            .avatar { width: 34px; height: 34px; border-radius: 50%; background: #1a73e8; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; flex-shrink: 0; }
+            .acc-name { font-size: 13px; font-weight: 600; color: #3c4043; }
+            .acc-email { font-size: 12px; color: #5f6368; }
+            .field { margin-bottom: 14px; }
+            label { display: block; font-size: 12px; color: #5f6368; margin-bottom: 4px; }
+            input { width: 100%; padding: 11px 12px; border: 1px solid #dadce0; border-radius: 6px; font-size: 14px; outline: none; }
+            input:focus { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
+            .err { color: #d93025; font-size: 12px; margin-bottom: 12px; display: none; }
+            .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
+            .btn-cancel { background: transparent; border: none; color: #1a73e8; font-weight: 600; font-size: 13px; cursor: pointer; padding: 8px 12px; border-radius: 4px; }
+            .btn-submit { background: #1a73e8; color: #fff; border: none; padding: 10px 22px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; }
+            .btn-submit:hover { background: #1557b0; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="header">
+              <svg width="18" height="18" viewBox="0 0 24 24">
+                <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"/>
+                <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"/>
+                <path fill="#FBBC05" d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"/>
+                <path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"/>
+              </svg>
+              <span>Fazer login com o Google</span>
+            </div>
+            <h1>Fazer login</h1>
+            <p class="sub">Prosseguir para <strong>Controle Financeiro</strong></p>
+
+            ${accountsHtml ? `<div class="acc-list">${accountsHtml}</div>` : ''}
+
+            <form id="gForm">
+              <div class="field">
+                <label>Seu Nome</label>
+                <input type="text" id="gName" placeholder="Ex: Andrey Dutra" />
+              </div>
+              <div class="field">
+                <label>E-mail do Google</label>
+                <input type="email" id="gEmail" placeholder="seuemail@gmail.com" required autofocus />
+              </div>
+              <div id="errBox" class="err">Informe um e-mail válido com @.</div>
+              <div class="actions">
+                <button type="button" class="btn-cancel" onclick="window.close()">Cancelar</button>
+                <button type="submit" class="btn-submit">Continuar</button>
+              </div>
+            </form>
+          </div>
+          <script>
+            function sendPayload(payload) {
+              try {
+                if (window.opener && window.opener.__handleGooglePopupAuth) {
+                  window.opener.__handleGooglePopupAuth(payload);
+                } else if (window.opener) {
+                  window.opener.postMessage({ type: 'CF_GOOGLE_AUTH_SUCCESS', payload: payload }, '*');
+                }
+              } catch (e) {}
+              window.close();
+            }
+            function selectSaved(email, name) {
+              document.getElementById('gEmail').value = email;
+              document.getElementById('gName').value = name;
+              sendPayload({ email: email, name: name });
+            }
+            document.getElementById('gForm').addEventListener('submit', function(e) {
+              e.preventDefault();
+              var email = document.getElementById('gEmail').value.trim().toLowerCase();
+              var name = document.getElementById('gName').value.trim();
+              if (!email || email.indexOf('@') === -1) {
+                document.getElementById('errBox').style.display = 'block';
+                return;
+              }
+              sendPayload({ email: email, name: name || email.split('@')[0] });
+            });
+          </script>
+        </body>
+        </html>
+      `);
+      popup.document.close();
+      popup.focus();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
   const handleGoogleButtonClick = async () => {
     setAuthError('');
     setAuthSuccess('');
+    setGoogleCustomError('');
+    setGooglePopupStep('login');
+
+    // Abre também o modal do Popup Google na tela (garante funcionamento mesmo se o navegador bloquear popups externos)
+    setShowGooglePicker(true);
 
     if (isFirebaseConfigured() && firebaseAuth && googleProvider) {
       try {
@@ -1104,14 +1300,88 @@ export default function App() {
         if (err?.code === 'auth/popup-closed-by-user') {
           return;
         }
-        console.warn('Abrindo popup Google integrado:', err);
+        console.warn('Usando janela de Popup Google integrada:', err);
       }
     }
 
-    // Abre o Popup Oficial do Google imediatamente na tela (compatível com desktop, mobile e iframe)
-    setGooglePopupStep('accounts');
-    setGoogleCustomError('');
-    setShowGooglePicker(true);
+    openExternalGooglePopupWindow();
+  };
+
+  // ==========================================
+  // HANDLERS DO PAINEL SUPERADMIN (EDITAR NOME E EXCLUIR CONTA)
+  // ==========================================
+  const handleAdminUpdateUserName = async (targetEmail) => {
+    const cleanEmail = String(targetEmail || '').trim().toLowerCase();
+    const cleanName = adminEditNameInput.trim();
+    if (!cleanEmail || !cleanName) return;
+
+    const latestDb = getLatestUsersDb(usersDb);
+    const existingUser = latestDb[cleanEmail];
+    if (!existingUser) return;
+
+    const updatedUser = {
+      ...existingUser,
+      name: cleanName
+    };
+
+    const nextDb = {
+      ...latestDb,
+      [cleanEmail]: updatedUser
+    };
+
+    try {
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+    } catch (_) {}
+
+    setUsersDb(nextDb);
+
+    if (currentUser?.email?.toLowerCase() === cleanEmail) {
+      const updatedCurrent = { ...currentUser, name: cleanName };
+      setCurrentUser(updatedCurrent);
+      try {
+        localStorage.setItem('cf_current_user_v5', JSON.stringify(updatedCurrent));
+      } catch (_) {}
+    }
+
+    if (isFirebaseConfigured()) {
+      withTimeout(setDoc(doc(firestoreDb, 'users', cleanEmail), updatedUser, { merge: true }), 2500).catch(
+        () => {}
+      );
+    }
+
+    setAdminEditingEmail(null);
+    setAdminEditNameInput('');
+    setAdminFeedback(`Nome do usuário ${cleanEmail} atualizado para "${cleanName}".`);
+    setTimeout(() => setAdminFeedback(''), 4000);
+  };
+
+  const handleAdminDeleteUser = async (targetEmail) => {
+    const cleanEmail = String(targetEmail || '').trim().toLowerCase();
+    if (!cleanEmail || cleanEmail === 'dumaster@teste.com') return;
+
+    const latestDb = getLatestUsersDb(usersDb);
+    const nextDb = { ...latestDb };
+    delete nextDb[cleanEmail];
+
+    try {
+      const deletedList = getDeletedUsersList();
+      if (!deletedList.includes(cleanEmail)) {
+        deletedList.push(cleanEmail);
+      }
+      localStorage.setItem('cf_deleted_users_v5', JSON.stringify(deletedList));
+      localStorage.setItem('cf_users_db_v5', JSON.stringify(nextDb));
+      localStorage.removeItem(`cf_data_v5_${cleanEmail}`);
+    } catch (_) {}
+
+    setUsersDb(nextDb);
+    setAdminDeletingEmail(null);
+
+    if (isFirebaseConfigured()) {
+      withTimeout(deleteDoc(doc(firestoreDb, 'users', cleanEmail)), 2500).catch(() => {});
+    }
+
+    setAdminFeedback(`Conta ${cleanEmail} excluída com sucesso.`);
+    setTimeout(() => setAdminFeedback(''), 4000);
   };
 
   const handleSaveDirectPassword = async (e) => {
@@ -1797,7 +2067,7 @@ export default function App() {
                       d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"
                     />
                   </svg>
-                  <span>Fazer login com o Google</span>
+                  <span>Fazer login nas Contas do Google</span>
                 </div>
                 <button
                   type="button"
@@ -1808,16 +2078,34 @@ export default function App() {
                 </button>
               </div>
 
-              {googlePopupStep === 'accounts' ? (
-                <>
-                  <div className="text-center mb-4">
-                    <h3 className="text-lg font-normal text-slate-900">Escolha uma conta</h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      para prosseguir para <strong className="text-blue-600">Controle Financeiro</strong>
-                    </p>
-                  </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const cleanEmail = googleCustomEmail.trim().toLowerCase();
+                  if (!cleanEmail || !cleanEmail.includes('@')) {
+                    setGoogleCustomError('Digite um e-mail do Google válido.');
+                    return;
+                  }
+                  handleSelectGoogleAccount({
+                    email: cleanEmail,
+                    name: googleCustomName.trim() || cleanEmail.split('@')[0],
+                    password: googleCustomPassword.trim()
+                  });
+                }}
+                className="space-y-3"
+              >
+                <div className="text-center mb-2">
+                  <h3 className="text-lg font-normal text-slate-900">Fazer login</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Use sua Conta do Google para prosseguir para{' '}
+                    <strong className="text-blue-600">Controle Financeiro</strong>
+                  </p>
+                </div>
 
-                  <div className="divide-y divide-slate-100 mb-3">
+                {Object.values(usersDb).filter(
+                  (u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com'
+                ).length > 0 && (
+                  <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-36 overflow-y-auto">
                     {Object.values(usersDb)
                       .filter((u) => u.role !== 'superadmin' && u.email !== 'dumaster@teste.com')
                       .map((u) => (
@@ -1825,9 +2113,9 @@ export default function App() {
                           key={u.email}
                           type="button"
                           onClick={() => handleSelectGoogleAccount(u)}
-                          className="w-full py-3 px-2 hover:bg-slate-50 flex items-center gap-3 transition cursor-pointer rounded-lg text-left"
+                          className="w-full py-2.5 px-3 hover:bg-blue-50/60 flex items-center gap-3 transition cursor-pointer text-left"
                         >
-                          <div className="w-9 h-9 rounded-full bg-blue-600 text-white font-semibold text-sm flex items-center justify-center shrink-0">
+                          <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-semibold text-xs flex items-center justify-center shrink-0">
                             {(u.name || u.email).charAt(0).toUpperCase()}
                           </div>
                           <div className="min-w-0 flex-1">
@@ -1836,83 +2124,58 @@ export default function App() {
                           </div>
                         </button>
                       ))}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setGooglePopupStep('custom');
-                        setGoogleCustomError('');
-                      }}
-                      className="w-full py-3 px-2 hover:bg-slate-50 flex items-center gap-3 transition cursor-pointer rounded-lg text-left"
-                    >
-                      <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 font-bold text-sm flex items-center justify-center shrink-0">
-                        +
-                      </div>
-                      <p className="text-xs font-medium text-slate-700">Usar outra conta do Google</p>
-                    </button>
                   </div>
-                </>
-              ) : (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const cleanEmail = googleCustomEmail.trim().toLowerCase();
-                    if (!cleanEmail || !cleanEmail.includes('@')) {
-                      setGoogleCustomError('Digite um e-mail do Google válido.');
-                      return;
-                    }
-                    handleSelectGoogleAccount({
-                      email: cleanEmail,
-                      name: googleCustomName.trim() || cleanEmail.split('@')[0]
-                    });
-                  }}
-                  className="space-y-3"
-                >
-                  <div className="text-center mb-2">
-                    <h3 className="text-lg font-normal text-slate-900">Fazer login</h3>
-                    <p className="text-xs text-slate-500">Use sua Conta do Google</p>
-                  </div>
+                )}
 
-                  {googleCustomError && (
-                    <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded-lg">
-                      {googleCustomError}
-                    </p>
-                  )}
+                {googleCustomError && (
+                  <p className="text-xs text-rose-600 bg-rose-50 p-2 rounded-lg">
+                    {googleCustomError}
+                  </p>
+                )}
 
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Nome de exibição (opcional)
+                  </label>
                   <input
                     type="text"
                     value={googleCustomName}
                     onChange={(e) => setGoogleCustomName(e.target.value)}
-                    placeholder="Seu nome (ex: Andrey Dutra)"
-                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
+                    placeholder="Ex: Andrey Dutra"
+                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none cursor-text"
                   />
+                </div>
 
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    E-mail do Google
+                  </label>
                   <input
                     type="email"
                     value={googleCustomEmail}
                     onChange={(e) => setGoogleCustomEmail(e.target.value)}
-                    placeholder="E-mail (@gmail.com)"
-                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none"
+                    placeholder="seuemail@gmail.com"
+                    className="w-full border border-slate-300 focus:border-blue-600 rounded-lg px-3 py-2 text-xs text-slate-900 outline-none cursor-text"
                     autoFocus
                   />
+                </div>
 
-                  <div className="flex items-center justify-between pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setGooglePopupStep('accounts')}
-                      className="text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
-                    >
-                      Voltar
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer"
-                    >
-                      Continuar
-                    </button>
-                  </div>
-                </form>
-              )}
+                <div className="flex items-center justify-between pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowGooglePicker(false)}
+                    className="text-xs font-semibold text-slate-500 hover:text-slate-800 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer shadow"
+                  >
+                    Continuar com Google
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         )}
@@ -2140,7 +2403,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-3 sm:px-6 pt-4 sm:pt-6 space-y-5 sm:space-y-6">
         {isSuperAdmin && viewMode === 'admin' ? (
           <div className="bg-[#0f172a] border border-amber-500/30 rounded-2xl p-6 shadow-xl">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <div className="flex items-center gap-2">
                 <Shield className="w-5 h-5 text-amber-400" />
                 <h2 className="text-base font-bold text-white">
@@ -2151,39 +2414,151 @@ export default function App() {
                 Total de usuários: {Object.keys(usersDb).length}
               </span>
             </div>
+
+            {adminFeedback && (
+              <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{adminFeedback}</span>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {Object.values(usersDb).map((u) => (
-                <div
-                  key={u.email}
-                  className="bg-[#090d16] border border-slate-800 rounded-xl p-4 flex items-center justify-between"
-                >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-bold text-white">{u.name}</p>
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
-                          u.role === 'superadmin'
-                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                            : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                        }`}
-                      >
-                        {u.role === 'superadmin' ? 'SuperAdmin' : 'Usuário'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-400 mt-0.5">{u.email}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCurrentUser({ email: u.email, name: u.name, role: u.role });
-                      setViewMode('preview');
-                    }}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition cursor-pointer"
+              {Object.values(usersDb).map((u) => {
+                const isMainAdmin =
+                  u.role === 'superadmin' || u.email === 'dumaster@teste.com';
+                const isEditingThisUser = adminEditingEmail === u.email;
+                const isDeletingThisUser = adminDeletingEmail === u.email;
+
+                return (
+                  <div
+                    key={u.email}
+                    className="bg-[#090d16] border border-slate-800 rounded-xl p-4 flex flex-col justify-between gap-3"
                   >
-                    Acessar
-                  </button>
-                </div>
-              ))}
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <p className="text-sm font-bold text-white truncate">{u.name}</p>
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${
+                              isMainAdmin
+                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                                : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                            }`}
+                          >
+                            {isMainAdmin ? 'SuperAdmin' : 'Usuário'}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5 break-all">{u.email}</p>
+
+                      {/* Edição de Nome do Usuário */}
+                      {isEditingThisUser && (
+                        <div className="mt-3 p-2.5 rounded-xl bg-[#0f172a] border border-emerald-500/40 space-y-2">
+                          <label className="block text-[10px] text-emerald-300 font-semibold">
+                            Alterar Nome do Usuário:
+                          </label>
+                          <input
+                            type="text"
+                            value={adminEditNameInput}
+                            onChange={(e) => setAdminEditNameInput(e.target.value)}
+                            placeholder="Novo nome..."
+                            className="w-full bg-[#070b14] border border-slate-700 focus:border-emerald-500 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none cursor-text"
+                            autoFocus
+                          />
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAdminEditingEmail(null);
+                                setAdminEditNameInput('');
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdminUpdateUserName(u.email)}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[11px] font-bold text-white cursor-pointer"
+                            >
+                              Salvar Nome
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Confirmação de Exclusão da Conta */}
+                      {isDeletingThisUser && !isMainAdmin && (
+                        <div className="mt-3 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 space-y-2">
+                          <p className="text-[11px] text-rose-200 font-medium">
+                            Tem certeza que deseja excluir a conta de <strong>{u.name}</strong>?
+                          </p>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setAdminDeletingEmail(null)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdminDeleteUser(u.email)}
+                              className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] font-bold text-white cursor-pointer"
+                            >
+                              Confirmar Exclusão
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAdminDeletingEmail(null);
+                            setAdminEditingEmail(u.email);
+                            setAdminEditNameInput(u.name || '');
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-[11px] font-semibold text-emerald-400 flex items-center gap-1 transition cursor-pointer"
+                          title="Alterar Nome do Usuário"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                          <span>Editar Nome</span>
+                        </button>
+
+                        {!isMainAdmin && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAdminEditingEmail(null);
+                              setAdminDeletingEmail(u.email);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-[11px] font-semibold text-rose-400 flex items-center gap-1 transition cursor-pointer"
+                            title="Excluir Conta do Usuário"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Excluir</span>
+                          </button>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCurrentUser({ email: u.email, name: u.name, role: u.role });
+                          setViewMode('preview');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-xs font-semibold text-emerald-300 transition cursor-pointer"
+                      >
+                        Acessar
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         ) : isSuperAdmin && viewMode === 'code' ? (
