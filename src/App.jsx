@@ -229,22 +229,30 @@ export default function App() {
       document.head.appendChild(globalStyle);
     }
     globalStyle.innerHTML = `
-      :root, html, body, #root {
+      html {
+        background-color: #070b14 !important;
+        color-scheme: dark !important;
+        scroll-behavior: smooth !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        height: auto !important;
+      }
+      body, #root {
         background-color: #070b14 !important;
         color: #f1f5f9 !important;
         margin: 0 !important;
         padding: 0 !important;
         width: 100% !important;
-        max-width: 100vw !important;
-        min-height: 100% !important;
         min-height: 100dvh !important;
-        overflow-x: hidden !important;
-        color-scheme: dark !important;
-        display: block !important;
-      }
-      body {
-        overscroll-behavior-y: none;
+        height: auto !important;
+        overflow-x: clip !important;
+        overflow-y: visible !important;
+        scroll-behavior: smooth !important;
+        -webkit-overflow-scrolling: touch;
         -webkit-tap-highlight-color: transparent;
+      }
+      * {
+        scroll-behavior: smooth;
       }
     `;
   }, []);
@@ -1762,7 +1770,7 @@ export default function App() {
   // ==========================================
   if (!currentUser) {
     return (
-      <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[#070b14] text-slate-100 flex items-center justify-center p-4 select-none cursor-default relative">
+      <div className="min-h-[100dvh] w-full overflow-x-clip scroll-smooth bg-[#070b14] text-slate-100 flex items-center justify-center p-4 select-none cursor-default relative">
         <div className="fixed inset-0 bg-[#070b14] -z-10 pointer-events-none" />
         <div className="w-full max-w-md bg-[#0f172a] border border-slate-800/80 rounded-2xl p-6 sm:p-8 shadow-2xl">
           <div className="flex items-center gap-3 mb-6">
@@ -1917,7 +1925,7 @@ export default function App() {
   // DASHBOARD PRINCIPAL
   // ==========================================
   return (
-    <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[#070b14] text-slate-100 select-none cursor-default pb-28 sm:pb-12 relative">
+    <div className="min-h-[100dvh] w-full overflow-x-clip scroll-smooth bg-[#070b14] text-slate-100 select-none cursor-default pb-28 sm:pb-12 relative">
       {/* Camada fixa para impedir fundo branco no overscroll do iOS/Android */}
       <div className="fixed inset-0 bg-[#070b14] -z-10 pointer-events-none" />
 
@@ -2834,7 +2842,7 @@ export default function App() {
                     </span>
                   </div>
 
-                  <div className="overflow-y-auto overflow-x-auto flex-1 pr-1">
+                  <div className="overflow-y-auto overflow-x-auto scroll-smooth flex-1 pr-1">
                     <table className="w-full text-left border-collapse min-w-[600px]">
                       <thead>
                         <tr className="border-b border-slate-800 text-[11px] text-slate-400">
